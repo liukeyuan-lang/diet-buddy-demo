@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#fffdf8">
+  <title>减肥搭子 · 公开演示版</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="desktop-shell">
+    <aside class="editorial" aria-hidden="true">
+      <div class="eyebrow">DIET BUDDY · V0.7A</div>
+      <h1>不是监督，<br>是一只陪你生活的<span>搭子</span>。</h1>
+      <p>从今天开始，用真实日期记录饮食与活动。没有填写不等于失败，休息也不会欠下任务。</p>
+      <div class="principle"><b>01</b><span><strong>记录真实发生</strong><small>餐食、运动与感受各自保存</small></span></div>
+      <div class="principle"><b>02</b><span><strong>结果由你确认</strong><small>不让照片或热量替你下结论</small></span></div>
+      <div class="principle"><b>03</b><span><strong>奖励始终一致</strong><small>贴纸与主任务进度清楚分开</small></span></div>
+    </aside>
+
+    <section class="phone" id="phone" aria-label="减肥搭子公开演示应用">
+      <div class="public-demo-notice" role="note">公开 DEMO · 仅本机保存 · 不提供 AI 识别</div>
+      <header class="topbar">
+        <div>
+          <div class="brand">减肥搭子 <span id="demo-badge" class="demo-badge">DEMO</span></div>
+          <div id="date-label" class="subtle">正在准备今天…</div>
+        </div>
+        <div class="header-actions">
+          <span class="icon-btn demo-lock" aria-label="固定为公开演示模式">演示版</span>
+          <button id="night-toggle" class="icon-btn" data-action="night-toggle" aria-label="切换夜间房间氛围" aria-pressed="false">☾</button>
+          <button id="rest-shortcut" class="icon-btn rest-shortcut" data-action="rest-open" aria-label="打开休息选项">休息</button>
+        </div>
+      </header>
+
+      <main class="scroll" id="scroll" tabindex="-1">
+        <div id="page" class="page" aria-live="polite"></div>
+      </main>
+
+      <nav class="room-dock" aria-label="房间快捷入口">
+        <button data-action="room-task-open"><span aria-hidden="true">▣</span>任务</button>
+        <button data-action="room-meal-open"><span aria-hidden="true">◉</span>拍一餐</button>
+        <button data-action="room-memory-open"><span aria-hidden="true">▤</span>回忆</button>
+      </nav>
+
+      <nav class="nav legacy-nav" aria-label="主导航">
+        <button data-nav="home"><span>⌂</span>今天</button>
+        <button data-nav="meal"><span>♨</span>饮食</button>
+        <button data-nav="activity"><span>♧</span>运动</button>
+        <button data-nav="review"><span>✦</span>复盘</button>
+      </nav>
+
+      <div id="overlay"></div>
+      <div id="toast" class="toast" role="status" hidden></div>
+    </section>
+  </div>
+  <script type="module" src="./app.mjs"></script>
+</body>
+</html>
