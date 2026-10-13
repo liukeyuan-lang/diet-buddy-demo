@@ -1,5 +1,5 @@
 // Presentation-only autonomous pet behavior. It owns timers/listeners and never writes application state.
-const PREF_KEY = 'dietbuddy_v06_pet_roam_enabled';
+const PREF_KEY = 'dietbuddy_public_demo_v1_pet_roam_enabled';
 export const PET_ROAM_SPOTS = Object.freeze([
   Object.freeze({ name: 'rug', left: 49, top: 48, activity: 'rug-stretch' }),
   Object.freeze({ name: 'window', left: 73, top: 39, activity: 'window-look' }),
