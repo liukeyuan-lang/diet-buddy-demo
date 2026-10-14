@@ -36,6 +36,17 @@ export const PET_WALK_CANDIDATE_ASSETS = Object.freeze([
   'assets/pet/pet-soft-walk-candidate-4.png',
 ]);
 
+// Soft-body lively-home candidates are kept separate from the approved 3×3
+// mood artwork and from the older four-frame prototype. Each entry is a real,
+// independently drawn pose on an equally padded transparent canvas.
+export const PET_LIFE_ASSETS = Object.freeze({
+  walk: Object.freeze(Array.from({ length: 8 }, (_, index) => `assets/pet/pet-soft-walk-v2-candidate-${String(index + 1).padStart(2, '0')}.png`)),
+  greet: Object.freeze(Array.from({ length: 4 }, (_, index) => `assets/pet/pet-soft-greet-candidate-${String(index + 1).padStart(2, '0')}.png`)),
+  groom: Object.freeze(Array.from({ length: 4 }, (_, index) => `assets/pet/pet-soft-groom-candidate-${String(index + 1).padStart(2, '0')}.png`)),
+  jump: Object.freeze(Array.from({ length: 4 }, (_, index) => `assets/pet/pet-soft-jump-candidate-${String(index + 1).padStart(2, '0')}.png`)),
+  loaf: Object.freeze(Array.from({ length: 4 }, (_, index) => `assets/pet/pet-soft-loaf-candidate-${String(index + 1).padStart(2, '0')}.png`)),
+});
+
 const MOOD_ALIASES = Object.freeze({
   normal: 'companion', idle: 'companion', companion: 'companion',
   happy: 'excited', excited: 'excited',
@@ -89,15 +100,24 @@ export function petRenderSpec(input = 'companion', legacyContext = 'home') {
 // optional multi-frame candidate. Every lookup is scoped to one pet render so
 // an adjacent resting image cannot redirect or expose another pet's fallback.
 export function activatePetFallback(image) {
-  if (!image?.classList?.contains('pet-image') && !image?.classList?.contains('pet-walk-frame')) return false;
+  if (!image?.classList?.contains('pet-image') && !image?.classList?.contains('pet-walk-frame') && !image?.classList?.contains('pet-life-frame')) return false;
   const petRender = image.closest?.('.pet-render');
   if (!petRender) return false;
   image.hidden = true;
   const candidateViewport = petRender.querySelector('.pet-walk-viewport');
+  const lifeStage = petRender.querySelector('.pet-life-stage');
+  const lifeStatic = petRender.querySelector('.pet-life-static');
   const candidateRestArt = petRender.querySelector('.pet-nest-rest-art');
   const fallback = petRender.querySelector('.pet-fallback');
+  if (image.classList.contains('pet-life-static') && petRender.dataset) petRender.dataset.petLifeStaticFailed = 'true';
+  const lifeStaticFailed = petRender.dataset?.petLifeStaticFailed === 'true';
   if (candidateViewport) candidateViewport.hidden = true;
+  if (lifeStage) lifeStage.hidden = true;
   if (candidateRestArt) candidateRestArt.hidden = true;
+  if (lifeStage && lifeStatic && !lifeStaticFailed && !image.classList.contains('pet-life-static')) {
+    lifeStatic.hidden = false;
+    return true;
+  }
   if (!fallback) return false;
   fallback.hidden = false;
   return true;

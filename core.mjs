@@ -1,5 +1,6 @@
 export const SCHEMA_VERSION = 6;
-// Public export storage names are deliberately isolated from the development app.
+// Public demo storage is isolated from the private/full application and from
+// earlier prototypes that may share the same browser origin.
 export const REAL_KEY = 'dietbuddy_public_demo_v1_state';
 export const DEMO_KEY = 'dietbuddy_public_demo_v1_state';
 export const LEGACY_KEY = 'dietbuddy_public_demo_v1_no_legacy_import';
@@ -97,6 +98,8 @@ export function initialState(options = {}) {
     plans: [plan],
     tasks,
     meals: [],
+    bodyMeasurements: [],
+    mealTemplates: [],
     activities: [],
     petEvents: [],
     rewardLedger: [],
@@ -105,7 +108,8 @@ export function initialState(options = {}) {
     memories: [],
     nextWeekDraft: null,
     timer: { running: false, startedAt: null, elapsedMs: 0, draftId: uid('timer') },
-    drafts: { meal: {}, activity: {} },
+    drafts: { meal: {}, activity: {}, bodyMeasurement: {} },
+    settings: { dailyCalorieTarget: null },
     ui: { view: 'home', demoDayIndex: 0 },
   };
 }
@@ -114,7 +118,262 @@ export function validateState(raw, mode = 'real') {
   if (!raw || raw.schemaVersion !== SCHEMA_VERSION || raw.mode !== mode) return null;
   const arrays = ['plans', 'tasks', 'meals', 'activities', 'petEvents', 'rewardLedger', 'weekReviews', 'pauses'];
   if (arrays.some((key) => !Array.isArray(raw[key]))) return null;
+  raw.bodyMeasurements = Array.isArray(raw.bodyMeasurements)
+    ? raw.bodyMeasurements.map(normalizeBodyMeasurement).filter(Boolean).slice(0, 1000)
+    : [];
+  raw.drafts = { meal: {}, activity: {}, bodyMeasurement: {}, ...(raw.drafts || {}) };
+  raw.mealTemplates = Array.isArray(raw.mealTemplates)
+    ? raw.mealTemplates.map(normalizeMealTemplate).filter(Boolean).slice(0, 50)
+    : [];
+  raw.settings = { dailyCalorieTarget: null, ...(raw.settings || {}) };
   return raw;
+}
+
+// These measurements are deliberately local, optional observations. They are
+// never used for task settlement, rewards, pet appearance, or health claims.
+function bodyValue(value, max) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  if (typeof value === 'string' && !value.trim()) return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 && number <= max ? number : null;
+}
+
+export function normalizeBodyMeasurement(raw) {
+  const date = String(raw?.date || '');
+  if (!raw || typeof raw !== 'object' || !/^\d{4}-\d{2}-\d{2}$/.test(date) || localDateKey(parseLocalDate(date)) !== date) return null;
+  const weightKg = bodyValue(raw.weightKg, 500);
+  const waistCm = bodyValue(raw.waistCm, 300);
+  const hipCm = bodyValue(raw.hipCm, 400);
+  if (weightKg === null && waistCm === null && hipCm === null) return null;
+  return {
+    id: String(raw.id || uid('body')).slice(0, 120),
+    date,
+    weightKg,
+    waistCm,
+    hipCm,
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),
+  };
+}
+
+export function bodyMeasurementSnapshot(records) {
+  const ordered = [...(records || [])].sort((a, b) => a.date.localeCompare(b.date) || a.updatedAt.localeCompare(b.updatedAt));
+  const metric = (key) => {
+    const measured = ordered.filter((item) => Number.isFinite(item[key]));
+    const latest = measured.at(-1) || null;
+    const prior = measured.length > 1 ? measured.at(-2) : null;
+    return { latest, prior, change: latest && prior ? latest[key] - prior[key] : null };
+  };
+  return { weightKg: metric('weightKg'), waistCm: metric('waistCm'), hipCm: metric('hipCm') };
+}
+
+const NUTRIENTS = Object.freeze(['kcal', 'protein', 'carbs', 'fat']);
+
+function finiteRange(value) {
+  if (!value || value.min === null || value.min === undefined || value.min === ''
+    || value.max === null || value.max === undefined || value.max === '') return null;
+  const min = Number(value?.min);
+  const max = Number(value?.max);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min < 0 || max < 0) return null;
+  return { min: Math.min(min, max), max: Math.max(min, max) };
+}
+
+function mealNutritionRanges(meal) {
+  const estimate = meal?.nutritionEstimate;
+  const historicalPartial = Boolean(estimate?.range && !estimate?.estimatorVersion
+    && (estimate?.unmappedIngredients?.length || estimate?.missingPortions?.length));
+  const explicitlyPartial = estimate?.estimateKind === 'partial-subtotal' || historicalPartial;
+  const source = explicitlyPartial ? (estimate?.partialRange || estimate?.range) : (estimate?.macroRange || estimate?.range);
+  const ranges = Object.fromEntries(NUTRIENTS.map((key) => [key, finiteRange(source?.[key])]));
+  const hasAny = NUTRIENTS.some((key) => ranges[key]);
+  const hasMacro = ['protein', 'carbs', 'fat'].some((key) => ranges[key]);
+  const completeMacros = !explicitlyPartial && ['protein', 'carbs', 'fat'].every((key) => ranges[key]);
+  return { ranges, hasAny, hasMacro, completeMacros, explicitlyPartial };
+}
+
+function addRange(target, range) {
+  if (!range) return;
+  target.min += range.min;
+  target.max += range.max;
+}
+
+// A day is complete only when every saved meal has a whole-meal macro range.
+// Otherwise numeric values are labelled known subtotals; meals without data are
+// counted separately and never contribute a synthetic zero.
+export function dailyNutritionSummary(state, date) {
+  const meals = (state?.meals || []).filter((meal) => meal.date === date);
+  const knownSubtotal = Object.fromEntries(NUTRIENTS.map((key) => [key, { min: 0, max: 0 }]));
+  const knownCounts = Object.fromEntries(NUTRIENTS.map((key) => [key, 0]));
+  let completeMeals = 0;
+  let partialMeals = 0;
+  let unknownMeals = 0;
+  let unmappedIngredients = 0;
+  let missingPortions = 0;
+
+  for (const meal of meals) {
+    const parsed = mealNutritionRanges(meal);
+    if (parsed.completeMacros) completeMeals += 1;
+    else if (parsed.hasMacro) partialMeals += 1;
+    else unknownMeals += 1;
+    for (const nutrient of NUTRIENTS) {
+      if (!parsed.ranges[nutrient]) continue;
+      addRange(knownSubtotal[nutrient], parsed.ranges[nutrient]);
+      knownCounts[nutrient] += 1;
+    }
+    const lines = [...(meal.ingredients || []), ...(meal.fatsAndSauces || [])];
+    if (lines.length) {
+      unmappedIngredients += lines.filter((line) => !line?.foodKey || line.foodKey === 'unknown').length;
+      missingPortions += lines.filter((line) => line?.foodKey && line.foodKey !== 'unknown'
+        && (line.gramsMin == null || line.gramsMax == null)).length;
+    } else {
+      unmappedIngredients += estimateCount(meal?.nutritionEstimate?.unmappedIngredients);
+      missingPortions += estimateCount(meal?.nutritionEstimate?.missingPortions);
+    }
+  }
+
+  for (const nutrient of NUTRIENTS) {
+    if (!knownCounts[nutrient]) knownSubtotal[nutrient] = null;
+  }
+  const complete = meals.length > 0 && completeMeals === meals.length;
+  return {
+    date,
+    status: !meals.length ? 'no-record' : complete ? 'complete' : knownCounts.protein || knownCounts.carbs || knownCounts.fat ? 'partial' : 'unavailable',
+    mealCount: meals.length,
+    completeMeals,
+    partialMeals,
+    unknownMeals,
+    unmappedIngredients,
+    missingPortions,
+    macroRange: complete ? {
+      protein: knownSubtotal.protein,
+      carbs: knownSubtotal.carbs,
+      fat: knownSubtotal.fat,
+    } : null,
+    knownSubtotal,
+    knownCounts,
+  };
+}
+
+function estimateCount(value) {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+export function nutritionWeekTrend(state, endDate) {
+  return Array.from({ length: 7 }, (_, index) => dailyNutritionSummary(state, addLocalDays(endDate, index - 6)));
+}
+
+function cleanTemplateLine(raw) {
+  const finiteGrams = (value) => {
+    if (value === null || value === undefined || value === '') return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.max(0, Math.min(3000, parsed)) : null;
+  };
+  const a = finiteGrams(raw?.gramsMin);
+  const b = finiteGrams(raw?.gramsMax);
+  return {
+    name: String(raw?.name || '').trim().slice(0, 80),
+    foodKey: String(raw?.foodKey || 'unknown').slice(0, 60),
+    gramsMin: a === null || b === null ? null : Math.min(a, b),
+    gramsMax: a === null || b === null ? null : Math.max(a, b),
+    confidence: ['high', 'medium', 'low'].includes(raw?.confidence) ? raw.confidence : 'low',
+    origin: ['ai-suggested', 'user-edited'].includes(raw?.origin) ? raw.origin : 'unknown',
+  };
+}
+
+export function normalizeMealTemplate(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const food = String(raw.food || '').trim().slice(0, 80);
+  if (!food) return null;
+  const portionScale = Number(raw.portionScale);
+  return {
+    id: String(raw.id || uid('meal-template')).slice(0, 120),
+    name: String(raw.name || food).trim().slice(0, 80) || food,
+    food,
+    mealType: ['breakfast', 'lunch', 'dinner', 'snack'].includes(raw.mealType) ? raw.mealType : 'snack',
+    portion: String(raw.portion || '').trim().slice(0, 120),
+    cookingMethod: ['unknown', 'pan_fried', 'steamed', 'deep_fried'].includes(raw.cookingMethod) ? raw.cookingMethod : 'unknown',
+    portionScale: Number.isFinite(portionScale) ? Math.max(10, Math.min(300, portionScale)) : 100,
+    ingredients: (Array.isArray(raw.ingredients) ? raw.ingredients : []).slice(0, 40).map(cleanTemplateLine),
+    fatsAndSauces: (Array.isArray(raw.fatsAndSauces) ? raw.fatsAndSauces : []).slice(0, 40).map(cleanTemplateLine),
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),
+  };
+}
+
+// Deliberately excludes photoId, AI analysis, nutrition snapshots, notes and
+// confirmation/reward identifiers. The template is an independent editable
+// snapshot and remains valid if its source meal is edited or deleted.
+export function createMealTemplate(input, options = {}) {
+  return normalizeMealTemplate({
+    id: options.id || uid('meal-template'),
+    name: options.name || input?.food,
+    food: input?.food,
+    mealType: input?.mealType,
+    portion: input?.portion,
+    cookingMethod: input?.cookingMethod,
+    portionScale: input?.portionScale,
+    ingredients: input?.ingredients,
+    fatsAndSauces: input?.fatsAndSauces,
+    createdAt: options.at,
+    updatedAt: options.at,
+  });
+}
+
+export function draftFromMealTemplate(template, portionPercent = 100, submissionId = uid('meal-submit')) {
+  const clean = normalizeMealTemplate(template);
+  if (!clean) return null;
+  const percent = Number(portionPercent);
+  const relative = Number.isFinite(percent) ? Math.max(10, Math.min(300, percent)) : 100;
+  return {
+    clientSubmissionId: submissionId,
+    food: clean.food,
+    mealType: clean.mealType,
+    portion: clean.portion,
+    cookingMethod: clean.cookingMethod,
+    portionScale: Math.max(10, Math.min(300, clean.portionScale * relative / 100)),
+    notes: '',
+    practice: 'unknown',
+    ingredients: structuredClone(clean.ingredients),
+    fatsAndSauces: structuredClone(clean.fatsAndSauces),
+    aiAnalysis: null,
+    nutritionEstimate: null,
+    existingPhotoId: null,
+    photoChanged: false,
+    removePhoto: false,
+  };
+}
+
+export function todayMealSummary(state, date) {
+  const meals = state.meals.filter((meal) => meal.date === date);
+  let kcalMin = 0;
+  let kcalMax = 0;
+  let rangedMeals = 0;
+  let unconfirmedIngredients = 0;
+  for (const meal of meals) {
+    const estimate = meal.nutritionEstimate;
+    const partial = estimate?.estimateKind === 'partial-subtotal'
+      || (!estimate?.estimatorVersion && Boolean(estimate?.unmappedIngredients?.length || estimate?.missingPortions?.length));
+    const range = !partial ? estimate?.range?.kcal : null;
+    if (range && Number.isFinite(Number(range.min)) && Number.isFinite(Number(range.max))) {
+      kcalMin += Number(range.min);
+      kcalMax += Number(range.max);
+      rangedMeals += 1;
+    }
+    const lines = [...(meal.ingredients || []), ...(meal.fatsAndSauces || [])];
+    unconfirmedIngredients += lines.length
+      ? lines.filter((line) => line.foodKey === 'unknown' || line.gramsMin == null || line.gramsMax == null).length
+      : Math.max(estimate?.unmappedIngredients?.length || 0, estimate?.missingPortions?.length || 0);
+  }
+  const target = Number(state.settings?.dailyCalorieTarget);
+  return {
+    mealCount: meals.length,
+    unconfirmedIngredients,
+    remainingRange: Number.isFinite(target) && target > 0 && meals.length && rangedMeals === meals.length
+      ? { min: target - kcalMax, max: target - kcalMin }
+      : null,
+    kcalRange: rangedMeals === meals.length && meals.length ? { min: kcalMin, max: kcalMax } : null,
+  };
 }
 
 export function activePlan(state) {
@@ -188,6 +447,7 @@ export function commitMealOnce(state, input, at = new Date().toISOString()) {
     id: input.id || uid('meal'),
     date: input.date,
     food: String(input.food || '').trim(),
+    mealType: ['breakfast', 'lunch', 'dinner', 'snack'].includes(input.mealType) ? input.mealType : 'snack',
     portion: String(input.portion || '').trim(),
     portionScale: Number(input.portionScale) || 100,
     notes: String(input.notes || '').trim(),

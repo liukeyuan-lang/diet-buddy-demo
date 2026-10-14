@@ -3,10 +3,13 @@ import {
   activePlan, taskForDate, visibleTaskStatus, isDatePaused, setTaskStatus, settleTaskReward,
   settleRecordSticker, commitMealOnce, reconcileActivityTask, invalidateDietConfirmation, pauseDates, resumeDate,
   updateFuturePlan, timerElapsedMs, startTimer, pauseTimer, resetTimer, weekSummary, endingForSummary,
-  saveWeekReviewOnce, worldProgress, uid,
+  saveWeekReviewOnce, worldProgress, todayMealSummary, dailyNutritionSummary, nutritionWeekTrend,
+  createMealTemplate, draftFromMealTemplate, uid,
+  normalizeBodyMeasurement, bodyMeasurementSnapshot,
 } from './core.mjs';
-import { PET_WALK_CANDIDATE_ASSETS, activatePetFallback, normalizeBodyVariant, petRenderSpec } from './pet.mjs';
+import { PET_LIFE_ASSETS, PET_WALK_CANDIDATE_ASSETS, activatePetFallback, normalizeBodyVariant, petRenderSpec } from './pet.mjs';
 import { mountPetRoam } from './pet-roam.mjs';
+import { mountPetLife } from './pet-life.mjs';
 import { createRoomHomeModel, roomHomeHtml } from './room-home.mjs';
 import { NUTRITION_FOODS, NUTRITION_SOURCE, estimateMealNutrition, normalizeEstimateLine } from './nutrition.mjs';
 import { commitLocalStateMutation } from './local-state-transaction.mjs';
@@ -20,9 +23,9 @@ const ROOM_ROAM_SPOTS = Object.freeze([
   Object.freeze({ name: 'window', left: 72, top: 51, activity: 'window-look' }),
   Object.freeze({ name: 'nest', left: 20, top: 55, activity: 'nest-rest' }),
 ]);
-// The generated walk sequence is isolated candidate art, not approved character
-// art. The production/default route must keep the user-approved orange/white
-// WebP. Opt in only for gait inspection with ?petPrototype=1.
+// The legacy four-frame walk sequence remains candidate art. The public build
+// disables its query-string prototype route; the default lively layer below is
+// separately marked as candidate artwork pending visual confirmation.
 const PUBLIC_STATE_KEY = 'dietbuddy_public_demo_v1_state';
 const PUBLIC_NIGHT_KEY = 'dietbuddy_public_demo_v1_room_night';
 const PUBLIC_PHOTO_DB = 'dietbuddy_public_demo_v1_media';
@@ -132,17 +135,28 @@ function walkingSoftPetCandidate(label) {
   return `<span class="pet-walk-facing" role="img" aria-label="${label}"><span class="pet-walk-size"><span class="pet-walk-turn"><span class="pet-walk-viewport"><span class="pet-walk-frames">${frames}</span></span><img class="pet-nest-rest-art pet-image" src="assets/pet/pet-soft-rest.webp" alt=""></span></span><span class="pet-fallback" hidden>${petSvg()}</span></span>`;
 }
 
+function livelySoftPetCandidate(label, approvedAsset) {
+  const sequences = Object.entries(PET_LIFE_ASSETS).map(([action, assets]) => {
+    const frames = assets.map((asset, index) => `<img class="pet-life-frame pet-life-frame-${index + 1}" src="${asset}" alt="">`).join('');
+    return `<span class="pet-life-sequence pet-life-sequence-${action}" data-frame-count="${assets.length}" aria-hidden="true">${frames}</span>`;
+  }).join('');
+  return `<span class="pet-life-facing" role="img" aria-label="${label}"><span class="pet-life-size"><span class="pet-life-turn"><span class="pet-life-stage">${sequences}</span></span></span><img class="pet-life-static pet-art pet-image" src="${esc(approvedAsset)}" alt="${label}" hidden><span class="pet-fallback" hidden>${petSvg()}</span></span>`;
+}
+
 // This legacy SVG is an explicitly temporary fallback, not formal character art.
 function renderPet(mood = 'companion', context = 'home') {
   const spec = petRenderSpec({ bodyVariant: state.petAppearance?.bodyVariant, mood, context });
   const label = `橘白色的${esc(plan().petName)}（${spec.mood === 'excited' ? '兴奋' : spec.mood === 'rest' ? '休息' : '陪伴'}态）`;
   const useWalkCandidate = petPrototypeEnabled && spec.context === 'home' && spec.bodyVariant === 'soft';
+  const usePetLife = !petPrototypeEnabled && spec.context === 'home' && spec.bodyVariant === 'soft';
   const content = useWalkCandidate
     ? walkingSoftPetCandidate(label)
+    : usePetLife
+    ? livelySoftPetCandidate(label, spec.asset)
     : spec.asset
     ? `<img class="pet-art pet-image" src="${esc(spec.asset)}" alt="${label}"><span class="pet-fallback" hidden>${petSvg()}</span>`
     : `<span class="pet-fallback" aria-label="${label}">${petSvg()}</span>`;
-  return `<span class="pet-render pet-${spec.context} pet-${spec.mood} pet-body-${spec.bodyVariant}${useWalkCandidate ? ' pet-sequence-candidate' : ''}" data-pet-body-variant="${spec.bodyVariant}" data-pet-mood="${spec.mood}" data-pet-context="${spec.context}">${content}</span>`;
+  return `<span class="pet-render pet-${spec.context} pet-${spec.mood} pet-body-${spec.bodyVariant}${useWalkCandidate ? ' pet-sequence-candidate' : ''}${usePetLife ? ' pet-life-candidate' : ''}" data-pet-body-variant="${spec.bodyVariant}" data-pet-mood="${spec.mood}" data-pet-context="${spec.context}">${content}</span>`;
 }
 
 function petMessage() {
@@ -187,9 +201,12 @@ function sceneHtml() {
   const paused = isDatePaused(state, currentDate());
   const mood = celebration ? 'excited' : paused ? 'rest' : 'companion';
   const walkCandidateEnabled = petPrototypeEnabled && normalizeBodyVariant(state.petAppearance?.bodyVariant) === 'soft';
+  const petLifeEnabled = !petPrototypeEnabled && normalizeBodyVariant(state.petAppearance?.bodyVariant) === 'soft';
   const prototypeChrome = walkCandidateEnabled
     ? '<span class="prototype-badge">AI 候选步态素材 · 待视觉确认</span><button class="pet-roam-toggle" data-action="pet-roam-toggle" type="button" aria-pressed="true" aria-label="关闭宠物自主走动">⟳</button>'
-    : '';
+    : petLifeEnabled
+      ? '<span class="prototype-badge">AI 候选动作素材 · 待视觉确认</span>'
+      : '';
   const task = currentTask();
   const taskStatus = visibleTaskStatus(state, task);
   const model = createRoomHomeModel({
@@ -205,15 +222,25 @@ function sceneHtml() {
     mealCount: state.meals.filter((item) => item.date === currentDate()).length,
     activityCount: state.activities.filter((item) => item.date === currentDate()).length,
   });
+  const summary = todayMealSummary(state, currentDate());
+  const dailyNutrition = dailyNutritionSummary(state, currentDate());
+  const macroLine = dailyNutrition.status === 'complete'
+    ? `蛋白质 ${formatRange(dailyNutrition.macroRange.protein)}g · 碳水 ${formatRange(dailyNutrition.macroRange.carbs)}g · 脂肪 ${formatRange(dailyNutrition.macroRange.fat)}g`
+    : dailyNutrition.status === 'partial'
+      ? `三大营养素仅有已知小计，${dailyNutrition.unknownMeals + dailyNutrition.partialMeals} 餐仍不完整`
+      : dailyNutrition.status === 'no-record' ? '今天未记录，不按 0 摄入计算' : '三大营养素暂无可汇总值';
+  const summaryHtml = `<section class="today-summary"><div><strong>今天的记录</strong><span>${summary.mealCount} 餐已确认 · ${summary.kcalRange ? `${summary.kcalRange.min}–${summary.kcalRange.max} kcal` : '热量区间待补充'} · ${summary.unconfirmedIngredients} 项食材待确认${summary.remainingRange ? ` · 剩余目标 ${summary.remainingRange.min}–${summary.remainingRange.max} kcal` : ''}</span><span>${macroLine}</span></div><div class="today-summary-actions"><button type="button" data-action="room-meal-open">查看饮食</button><button type="button" data-action="body-open">身体记录</button></div></section>`;
   const feedbackHtml = roomFeedbackHtml();
   const html = roomHomeHtml({
     model,
     petHtml: renderPet(mood, 'home'),
     feedbackHtml,
+    summaryHtml,
     prototypeChrome,
     petMotionClass: petMotion ? `pet-motion-${petMotion}` : '',
   });
-  return walkCandidateEnabled ? html.replace('room-world pet-scene', 'room-world pet-scene pet-prototype-scene') : html;
+  if (walkCandidateEnabled) return html.replace('room-world pet-scene', 'room-world pet-scene pet-prototype-scene');
+  return petLifeEnabled ? html.replace('room-world pet-scene', 'room-world pet-scene pet-life-scene') : html;
 }
 
 function setupHtml() {
@@ -224,6 +251,32 @@ function homeHtml() {
   return sceneHtml();
 }
 
+function bodyMetricHtml(label, unit, item) {
+  if (!item.latest) return `<div class="body-metric"><small>${label}</small><strong>未记录</strong><span>填写可选</span></div>`;
+  const change = item.change === null ? '暂无上次记录可比较' : `${item.change > 0 ? '+' : ''}${formatBodyValue(item.change)} ${unit}（较上次）`;
+  const key = label === '体重' ? 'weightKg' : label === '腰围' ? 'waistCm' : 'hipCm';
+  return `<div class="body-metric"><small>${label}</small><strong>${formatBodyValue(item.latest[key])} ${unit}</strong><span>${esc(dateLabel(item.latest.date))}</span><em>${change}</em></div>`;
+}
+
+function formatBodyValue(value) {
+  return Number(value).toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function bodyEntry(item) {
+  const values = [['体重', item.weightKg, 'kg'], ['腰围', item.waistCm, 'cm'], ['臀围', item.hipCm, 'cm']]
+    .filter(([, value]) => value !== null).map(([label, value, unit]) => `${label} ${formatBodyValue(value)} ${unit}`).join(' · ');
+  return `<div class="list-entry"><div><strong>${esc(dateLabel(item.date))}</strong><small>${values}</small></div><div class="entry-actions"><button data-action="body-edit" data-id="${esc(item.id)}">编辑</button><button data-action="body-delete" data-id="${esc(item.id)}">删除</button></div></div>`;
+}
+
+function bodyHtml() {
+  const draft = state.drafts.bodyMeasurement || {};
+  const snapshot = bodyMeasurementSnapshot(state.bodyMeasurements);
+  const records = [...state.bodyMeasurements].sort((a, b) => b.date.localeCompare(a.date) || b.updatedAt.localeCompare(a.updatedAt));
+  const input = (name, label, unit, max, value) => `<label class="form-label">${label}（可选）<span>${unit}</span></label><input class="field" name="${name}" type="number" inputmode="decimal" min="0.01" max="${max}" step="0.01" value="${esc(value ?? '')}" placeholder="留空即可">`;
+  const clear = draft.editId ? '<div class="body-clear"><label><input type="checkbox" name="clearWeight"> 清除体重</label><label><input type="checkbox" name="clearWaist"> 清除腰围</label><label><input type="checkbox" name="clearHip"> 清除臀围</label></div>' : '';
+  return `<span class="pill">⚪ 身体记录</span><h1 class="title">记下身体数据，<br>回看自己的变化。</h1><p class="lead">体重与围度填写可选，保存在当前浏览器。</p><section class="body-snapshot">${bodyMetricHtml('体重', 'kg', snapshot.weightKg)}${bodyMetricHtml('腰围', 'cm', snapshot.waistCm)}${bodyMetricHtml('臀围', 'cm', snapshot.hipCm)}</section><form id="body-form" data-edit-id="${esc(draft.editId || '')}"><label class="form-label">记录日期</label><input class="field" name="date" type="date" required value="${esc(draft.date || currentDate())}">${input('weightKg', '体重', 'kg', 500, draft.weightKg)}${input('waistCm', '腰围', 'cm', 300, draft.waistCm)}${input('hipCm', '臀围', 'cm', 400, draft.hipCm)}${clear}<p class="hint">同一日期只保留一条记录。再次保存会保留该日期未填写的已有数值；要移除时勾选对应“清除”。</p><button class="btn block" type="submit" style="margin-top:14px">${draft.editId ? '保存修改' : '保存身体记录'}</button>${draft.editId ? '<button class="btn ghost block" type="button" data-action="body-cancel" style="margin-top:7px">取消编辑</button>' : ''}</form><div class="section-heading">历史记录 <span>${records.length} 条</span></div><div class="card">${records.length ? records.map(bodyEntry).join('') : '<p class="lead">还没有身体记录。你可以从体重或腰围中任选一项开始。</p>'}</div>`;
+}
+
 function mealHtml() {
   const date = currentDate();
   const draft = ensureMealDraft();
@@ -232,7 +285,73 @@ function mealHtml() {
     ? `<img src="${pendingPhotoUrl}" alt="待确认的餐食照片"><span class="photo-state">已在本机压缩 · 确认前不写入餐食</span>`
     : '<span class="picture-empty">📷<br><small>先拍照或从相册选择</small></span>';
   const estimate = nutritionEstimateHtml(draft.nutritionEstimate);
-  return `<span class="pill">🥣 饮食记录</span><h1 class="title">手动记下一餐，<br>确认权在你。</h1><div class="note">公开展示版不提供 AI 识别。照片只在本机预览和保存，不会发送到服务器或第三方；也可以不选照片，直接手动记录。</div><form id="meal-form" data-edit-id="${esc(draft.editId || '')}"><label class="form-label">餐食照片（可选）</label><div class="picture" id="photo-preview">${photoMarkup}</div><div class="photo-actions"><label class="btn secondary small">${pendingPhotoUrl ? '重新拍照' : '拍照'}<input type="file" id="meal-camera" accept="image/jpeg,image/png,image/webp" capture="environment" hidden></label><label class="btn ghost small">${pendingPhotoUrl ? '从相册替换' : '从相册选择'}<input type="file" id="meal-gallery" accept="image/jpeg,image/png,image/webp" hidden></label>${pendingPhotoUrl ? '<button class="btn danger small" type="button" data-action="photo-remove">取消照片</button>' : ''}</div><button class="btn peach block" type="button" data-action="meal-analyze" disabled>展示版不提供 AI 识别</button>${mealAnalysisError ? `<div class="inline-error" role="alert">${esc(mealAnalysisError)}<br><small>照片仍仅在本机，可继续手工填写。</small></div>` : ''}<div id="meal-nutrition-estimate">${estimate}</div><label class="form-label">食物 / 餐食名称 *</label><input class="field" name="food" required maxlength="80" value="${esc(draft.food || '')}" placeholder="例如：番茄鸡蛋面"><label class="form-label">份量描述（可选）</label><input class="field" name="portion" maxlength="120" value="${esc(draft.portion || '')}" placeholder="例如：一碗，大约 350–450 克"><label class="form-label">烹调方式（可选，用于粗估假设）</label><select class="field" name="cookingMethod"><option value="unknown" ${!draft.cookingMethod || draft.cookingMethod === 'unknown' ? 'selected' : ''}>不确定 / 先不补充</option><option value="pan_fried" ${draft.cookingMethod === 'pan_fried' ? 'selected' : ''}>煎 / 香煎</option><option value="steamed" ${draft.cookingMethod === 'steamed' ? 'selected' : ''}>清蒸 / 少油</option><option value="deep_fried" ${draft.cookingMethod === 'deep_fried' ? 'selected' : ''}>油炸</option></select><label class="form-label">份量系数（相对当前估算）</label><div class="portion-scale"><input class="field" name="portionScale" type="number" min="10" max="300" step="5" value="${esc(draft.portionScale || 100)}"><span>%</span></div><p class="hint">例如只吃了图中一半，改为 50%；重新估算只缩放一次整体区间。所有补充都是可选的，不补也可保存。</p><div class="section-heading compact">食材 <button class="btn ghost small" type="button" data-action="meal-line-add" data-group="ingredients">+添加</button></div>${mealLinesHtml(draft.ingredients, 'ingredients')}<div class="section-heading compact">油 / 酱料 <button class="btn ghost small" type="button" data-action="meal-line-add" data-group="fatsAndSauces">+添加</button></div>${mealLinesHtml(draft.fatsAndSauces, 'fatsAndSauces')}<button class="btn secondary block" type="button" data-action="meal-reestimate">按当前信息重新估算</button><label class="form-label">本次是否实践了约定行动？</label><div class="radio-row">${[['yes','有'],['no','没有'],['unknown','不确定']].map(([value,label]) => `<label class="radio-pill"><input type="radio" name="practice" value="${value}" ${(draft.practice || 'unknown') === value ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div><p class="hint">记录一餐不会自动判定整天任务，主任务仍由你单独确认。</p><label class="form-label">备注（可选）</label><textarea class="field" name="notes" rows="2" maxlength="240" placeholder="当时的感受、场景或想记住的事">${esc(draft.notes || '')}</textarea><button class="btn block" type="submit" style="margin-top:14px">${draft.editId ? '确认并保存修改' : '我已核对，确认保存这一餐'}</button><button class="btn ghost block" type="button" data-action="${draft.editId ? 'cancel-edit' : 'meal-cancel'}" style="margin-top:7px">${draft.editId ? '取消编辑' : '取消，不保存'}</button></form><div class="section-heading">${dateLabel(date)} <span>${items.length} 餐</span></div><div class="card">${items.length ? items.map(mealEntry).join('') : '<p class="lead">今天还没有餐食记录。没有填写不会自动算作未完成。</p>'}</div>`;
+  const recognized = draft.aiAnalysis ? `<div class="analysis-meta"><b>AI 图像线索 · ${confidenceLabel(draft.aiAnalysis.overallConfidence)}</b><span>${esc(providerLabel(draft.aiAnalysis))} · 模型 ${esc(draft.aiAnalysis.model || '未知')}</span></div>${draft.aiAnalysis.uncertainties?.length ? `<details class="note warning analysis-uncertainties"><summary>待核对信息（${draft.aiAnalysis.uncertainties.length} 项）</summary><small>${draft.aiAnalysis.uncertainties.map(esc).join('；')}</small></details>` : ''}` : '';
+  return `<span class="pill">🥣 饮食记录</span><h1 class="title">手动记下一餐，<br>确认权在你。</h1><div class="note">公开展示版不提供 AI 识别。照片只在本机预览和保存，不会发送到服务器或第三方；也可以不选照片，直接手动记录。</div><form id="meal-form" data-edit-id="${esc(draft.editId || '')}"><label class="form-label">餐食照片（可选）</label><div class="picture" id="photo-preview">${photoMarkup}</div><div class="photo-actions"><label class="btn secondary small">${pendingPhotoUrl ? '重新拍照' : '拍照'}<input type="file" id="meal-camera" accept="image/jpeg,image/png,image/webp" capture="environment" hidden></label><label class="btn ghost small">${pendingPhotoUrl ? '从相册替换' : '从相册选择'}<input type="file" id="meal-gallery" accept="image/jpeg,image/png,image/webp" hidden></label>${pendingPhotoUrl ? '<button class="btn danger small" type="button" data-action="photo-remove">取消照片</button>' : ''}</div><button class="btn peach block" type="button" data-action="meal-analyze" disabled>展示版不提供 AI 识别</button>${mealAnalysisError ? `<div class="inline-error" role="alert">${esc(mealAnalysisError)}<br><small>照片和草稿已保留在当前页面，可重试或继续手工填写。</small></div>` : ''}<div id="meal-nutrition-estimate">${estimate}</div><label class="form-label">食物 / 餐食名称 *</label><input class="field" name="food" required maxlength="80" value="${esc(draft.food || '')}" placeholder="例如：番茄鸡蛋面"><label class="form-label">份量描述（可选）</label><input class="field" name="portion" maxlength="120" value="${esc(draft.portion || '')}" placeholder="例如：一碗，大约 350–450 克"><label class="form-label">烹调方式（可选，用于粗估假设）</label><select class="field" name="cookingMethod"><option value="unknown" ${!draft.cookingMethod || draft.cookingMethod === 'unknown' ? 'selected' : ''}>不确定 / 先不补充</option><option value="pan_fried" ${draft.cookingMethod === 'pan_fried' ? 'selected' : ''}>煎 / 香煎</option><option value="steamed" ${draft.cookingMethod === 'steamed' ? 'selected' : ''}>清蒸 / 少油</option><option value="deep_fried" ${draft.cookingMethod === 'deep_fried' ? 'selected' : ''}>油炸</option></select><label class="form-label">份量系数（相对当前估算）</label><div class="portion-scale"><input class="field" name="portionScale" type="number" min="10" max="300" step="5" value="${esc(draft.portionScale || 100)}"><span>%</span></div><p class="hint">例如只吃了图中一半，改为 50%；重新估算只缩放一次整体区间。所有补充都是可选的，不补也可保存。</p><div class="section-heading compact">食材 <button class="btn ghost small" type="button" data-action="meal-line-add" data-group="ingredients">+添加</button></div>${mealLinesHtml(draft.ingredients, 'ingredients')}<div class="section-heading compact">油 / 酱料 <button class="btn ghost small" type="button" data-action="meal-line-add" data-group="fatsAndSauces">+添加</button></div>${mealLinesHtml(draft.fatsAndSauces, 'fatsAndSauces')}<button class="btn secondary block" type="button" data-action="meal-reestimate">按当前信息重新估算</button><button class="btn ghost block" type="button" data-action="meal-template-save-draft" style="margin-top:7px">收藏当前填写为常吃餐</button><label class="form-label">本次是否实践了约定行动？</label><div class="radio-row">${[['yes','有'],['no','没有'],['unknown','不确定']].map(([value,label]) => `<label class="radio-pill"><input type="radio" name="practice" value="${value}" ${(draft.practice || 'unknown') === value ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div><p class="hint">记录一餐不会自动判定整天任务，主任务仍由你单独确认。</p><label class="form-label">备注（可选）</label><textarea class="field" name="notes" rows="2" maxlength="240" placeholder="当时的感受、场景或想记住的事">${esc(draft.notes || '')}</textarea><button class="btn block" type="submit" style="margin-top:14px">${draft.editId ? '确认并保存修改' : '我已核对，确认保存这一餐'}</button><button class="btn ghost block" type="button" data-action="${draft.editId ? 'cancel-edit' : 'meal-cancel'}" style="margin-top:7px">${draft.editId ? '取消编辑' : '取消，不保存'}</button></form><div class="section-heading">${dateLabel(date)} <span>${items.length} 餐</span></div><div class="card">${items.length ? items.map(mealEntry).join('') : '<p class="lead">今天还没有餐食记录。没有填写不会自动算作未完成。</p>'}</div>`;
+}
+
+function formatRange(range, digits = 1) {
+  if (!range) return '未知';
+  const clean = (value) => Number(value).toFixed(digits).replace(/\.0$/, '');
+  return `${clean(range.min)}–${clean(range.max)}`;
+}
+
+function dailyNutritionHtml(summary) {
+  if (summary.status === 'no-record') {
+    return '<section class="macro-summary empty"><div class="row"><strong>今日三大营养素</strong><span>未记录</span></div><p>今天没有已保存餐食；未记录不会显示成 0g。</p></section>';
+  }
+  const ranges = summary.macroRange || summary.knownSubtotal;
+  const label = summary.status === 'complete' ? '已录餐食完整汇总' : summary.status === 'partial' ? '已知小计 · 非全天' : '暂不可汇总';
+  const cards = ['protein', 'carbs', 'fat'].map((key) => {
+    const name = ({ protein: '蛋白质', carbs: '碳水', fat: '脂肪' })[key];
+    return `<div><small>${name}</small><strong>${ranges?.[key] ? `${formatRange(ranges[key])}g` : '未知'}</strong></div>`;
+  }).join('');
+  const gaps = [summary.partialMeals ? `${summary.partialMeals} 餐仅有部分数据` : '', summary.unknownMeals ? `${summary.unknownMeals} 餐无宏量数据` : '', summary.unmappedIngredients ? `${summary.unmappedIngredients} 项未映射` : '', summary.missingPortions ? `${summary.missingPortions} 项缺克数` : ''].filter(Boolean).join(' · ');
+  return `<section class="macro-summary ${summary.status}"><div class="row"><strong>今日三大营养素</strong><span>${label}</span></div><div class="macro-summary-grid">${cards}</div><p>${summary.status === 'complete' ? `${summary.mealCount} 餐都有完整整餐宏量区间。` : gaps || '现有餐食没有可汇总的蛋白质、碳水和脂肪数据。'}</p></section>`;
+}
+
+function nutritionWeekHtml(days) {
+  const dayCards = days.map((day) => {
+    const local = new Date(`${day.date}T12:00:00`);
+    const label = `${local.getMonth() + 1}/${local.getDate()}`;
+    if (day.status === 'no-record') return `<div class="trend-day no-record"><b>${label}</b><span>未记录</span><small>不计 0</small></div>`;
+    if (day.status === 'unavailable') return `<div class="trend-day unavailable"><b>${label}</b><span>${day.mealCount} 餐 · 宏量未知</span><small>${day.knownSubtotal.kcal ? `${formatRange(day.knownSubtotal.kcal, 0)} kcal 已知` : '热量未知'}</small></div>`;
+    const ranges = day.macroRange || day.knownSubtotal;
+    return `<div class="trend-day ${day.status}"><b>${label}</b><span>${day.status === 'complete' ? '已录完整' : '已知小计'}</span><small>${day.knownSubtotal.kcal ? `${formatRange(day.knownSubtotal.kcal, 0)} kcal` : 'kcal 未知'}</small><small>P ${formatRange(ranges.protein)}g</small><small>C ${formatRange(ranges.carbs)}g</small><small>F ${formatRange(ranges.fat)}g</small></div>`;
+  }).join('');
+  return `<details class="nutrition-week"><summary>近 7 天营养趋势</summary><p>绿色为当天所有已记录餐食都有完整宏量区间；黄色只展示已知小计。灰色“未记录”和“宏量未知”不会按 0 画入趋势。</p><div class="trend-days">${dayCards}</div></details>`;
+}
+
+function mealTemplatesHtml() {
+  const templates = state.mealTemplates || [];
+  const options = templates.map((template) => `<option value="${esc(template.id)}">${esc(template.name)} · ${esc(template.portion || '默认份量')}</option>`).join('');
+  const manage = templates.map((template) => `<div class="template-manage-row" data-template-row="${esc(template.id)}"><input class="field" maxlength="80" value="${esc(template.name)}" aria-label="常吃餐名称"><button class="btn ghost small" type="button" data-action="meal-template-rename" data-id="${esc(template.id)}">改名</button><button class="btn danger small" type="button" data-action="meal-template-delete" data-id="${esc(template.id)}">删除</button></div>`).join('');
+  return `<section class="meal-templates"><div class="row"><strong>常吃餐</strong><span>${templates.length} 个本地模板</span></div>${templates.length ? `<div class="template-apply"><select class="field" id="meal-template-select" aria-label="选择常吃餐">${options}</select><label>本次相对模板份量 <span><input class="field" id="meal-template-percent" type="number" min="10" max="300" step="5" value="100">%</span></label><button class="btn secondary" type="button" data-action="meal-template-apply">套用到草稿</button></div><details><summary>管理常吃餐</summary>${manage}</details>` : '<p>可从已保存餐食或当前填写收藏。模板只保留餐名、餐次、份量与食材克数，不保存照片、备注或 AI 图片分析。</p>'}</section>`;
+}
+
+function enhanceMealPage(root = page) {
+  const form = $('#meal-form', root);
+  if (!form) return;
+  const date = currentDate();
+  const summary = todayMealSummary(state, date);
+  const dailyNutrition = dailyNutritionSummary(state, date);
+  const trend = nutritionWeekTrend(state, date);
+  const latest = [...state.meals].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const heading = $('.pill', root);
+  heading.insertAdjacentHTML('afterend', `<section class="meal-summary"><strong>今日摘要</strong><span>${summary.mealCount} 餐已确认</span><span>${summary.kcalRange ? `${summary.kcalRange.min}–${summary.kcalRange.max} kcal` : '暂无已录餐食完整热量区间'}</span><span>${summary.unconfirmedIngredients} 项食材待确认</span>${summary.remainingRange ? `<span>剩余目标 ${summary.remainingRange.min}–${summary.remainingRange.max} kcal</span>` : ''}</section>${dailyNutritionHtml(dailyNutrition)}${nutritionWeekHtml(trend)}<form id="calorie-target-form" class="target-form"><label class="form-label" for="daily-calorie-target">每日热量目标（可选）</label><div class="target-input"><input class="field" id="daily-calorie-target" name="target" type="number" min="500" max="10000" step="50" value="${esc(state.settings.dailyCalorieTarget || '')}" placeholder="留空表示不设置"><button class="btn ghost small" type="submit">保存目标</button></div><small class="hint">仅按已保存餐食估算剩余区间，不扣除运动消耗。</small></form>${mealTemplatesHtml()}${latest && !form.dataset.editId ? `<button class="btn secondary block" type="button" data-action="meal-copy-recent">复制最近一餐（${esc(latest.food)}）</button>` : ''}`);
+  const foodInput = form.querySelector('[name="food"]');
+  const type = document.createElement('label');
+  type.className = 'form-label';
+  type.textContent = '餐食类型';
+  const select = document.createElement('select');
+  select.className = 'field'; select.name = 'mealType';
+  select.innerHTML = '<option value="breakfast">早餐</option><option value="lunch">午餐</option><option value="dinner">晚餐</option><option value="snack">加餐</option>';
+  select.value = state.drafts.meal?.mealType || 'snack';
+  if (foodInput) { foodInput.before(select); foodInput.before(type); }
+  form.querySelectorAll('[data-action="meal-edit"]').forEach((button) => {
+    const item = state.meals.find((meal) => meal.id === button.dataset.id);
+    const title = button.closest('.list-entry')?.querySelector('strong');
+    if (item && title) title.insertAdjacentHTML('beforeend', ` <small>${({breakfast:'早餐',lunch:'午餐',dinner:'晚餐',snack:'加餐'})[item.mealType || 'snack']}</small>`);
+  });
 }
 
 function mealEntry(item) {
@@ -244,7 +363,7 @@ function mealEntry(item) {
       : estimate?.estimateKind === 'partial-subtotal' ? '已映射项小计，非整餐'
         : '按已确认食材估算';
   const aiLabel = item.aiAnalysis ? (item.aiAnalysis.recognized ? ' · AI 辅助后已确认' : ' · AI 未识别后手工记录') : '';
-  return `<div class="list-entry"><div><strong>${esc(item.food)}</strong><small>${esc(item.portion || '份量未补充')}${kcal ? ` · ${estimateLabel} ${kcal.min}–${kcal.max} kcal` : ''} · 行动：${({yes:'有实践',no:'未实践',unknown:'不确定'})[item.actionPractice]}<br>${fmtTime(item.createdAt)}${item.notes ? ` · ${esc(item.notes)}` : ''}${item.photoId ? ' · 照片已本地保存' : ''}${aiLabel}</small></div><div class="entry-actions"><button data-action="meal-edit" data-id="${item.id}" aria-label="编辑${esc(item.food)}">编辑</button><button data-action="meal-delete" data-id="${item.id}" aria-label="删除${esc(item.food)}">删除</button></div></div>`;
+  return `<div class="list-entry"><div><strong>${esc(item.food)}</strong><small>${esc(item.portion || '份量未补充')}${kcal ? ` · ${estimateLabel} ${kcal.min}–${kcal.max} kcal` : ''} · 行动：${({yes:'有实践',no:'未实践',unknown:'不确定'})[item.actionPractice]}<br>${fmtTime(item.createdAt)}${item.notes ? ` · ${esc(item.notes)}` : ''}${item.photoId ? ' · 照片已本地保存' : ''}${aiLabel}</small></div><div class="entry-actions"><button data-action="meal-template-save-record" data-id="${item.id}" aria-label="收藏${esc(item.food)}为常吃餐">收藏</button><button data-action="meal-edit" data-id="${item.id}" aria-label="编辑${esc(item.food)}">编辑</button><button data-action="meal-delete" data-id="${item.id}" aria-label="删除${esc(item.food)}">删除</button></div></div>`;
 }
 
 function roomMemoryRecordsHtml() {
@@ -345,6 +464,7 @@ function render() {
   clearInterval(timerTicker);
   const view = state.setupComplete ? (state.ui.view || 'home') : 'setup';
   phone.dataset.view = view;
+  $('#pet-life-toggle').hidden = !(state.setupComplete && view === 'home' && !petPrototypeEnabled && normalizeBodyVariant(state.petAppearance?.bodyVariant) === 'soft');
   phone.classList.toggle('room-night', roomNight && view === 'home');
   $('#demo-badge').hidden = mode !== 'demo';
   const index = dayIndex(plan().startDate, currentDate());
@@ -354,7 +474,8 @@ function render() {
   $('#night-toggle').textContent = roomNight ? '☀' : '☾';
   if (!state.setupComplete) page.innerHTML = setupHtml();
   else {
-    page.innerHTML = view === 'home' ? homeHtml() : view === 'meal' ? mealHtml() : view === 'activity' ? activityHtml() : reviewHtml();
+    page.innerHTML = view === 'home' ? homeHtml() : view === 'meal' ? mealHtml() : view === 'activity' ? activityHtml() : view === 'body' ? bodyHtml() : reviewHtml();
+    if (view === 'meal') enhanceMealPage();
     document.querySelectorAll('[data-nav]').forEach((button) => button.classList.toggle('active', button.dataset.nav === view));
     if (view === 'activity' || modal === 'room-activity') timerTicker = setInterval(updateTimerLabel, 1000);
   }
@@ -372,6 +493,14 @@ function syncPetRoam() {
       resting,
       reacting: Boolean(petMotion),
       spots: ROOM_ROAM_SPOTS,
+    });
+  } else if (normalizeBodyVariant(state.petAppearance?.bodyVariant) === 'soft' && scene) {
+    const resting = isDatePaused(state, currentDate());
+    unmountPetRoam = mountPetLife(scene, {
+      toggle: $('#pet-life-toggle'),
+      paused: Boolean(modal) || Boolean(celebration),
+      resting,
+      reacting: Boolean(petMotion),
     });
   }
 }
@@ -418,6 +547,7 @@ function renderOverlay() {
   }
   const roomFlow = modal.startsWith('room-');
   overlay.innerHTML = `<div class="modal-backdrop" data-action="backdrop"><section class="sheet${roomFlow ? ' room-flow-sheet' : ''}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="row sheet-heading"><h2>${esc(title)}</h2><button class="close" data-action="modal-close" aria-label="关闭并返回房间">×</button></div>${content}</section></div>`;
+  if (modal === 'room-meal') enhanceMealPage(overlay);
   if (modal === 'plan') {
     const form = $('#plan-form');
     form.elements.focus.value = plan().focus;
@@ -468,13 +598,24 @@ function playPetMotion(kind, duration = 760) {
 
 function interactPet(kind) {
   const longPress = kind === 'hold';
-  addPetEvent('companion', longPress ? '我在。今天慢一点也完全可以。' : '摸摸收到啦。今天无论做多少，我都陪着你。');
+  const pet = $('[data-action="pet"]');
+  const sleeping = pet?.dataset.roamState === 'sleeping' || pet?.dataset.spotActivity === 'nest-rest';
+  const lively = Boolean(pet?.querySelector('.pet-life-stage'));
+  const tapMotions = lively ? ['greet', 'groom'] : ['tilt', 'blink', 'hop'];
+  const motion = sleeping ? 'sleep-react' : longPress && lively ? 'groom' : longPress ? 'petting' : tapMotions[petTapSequence++ % tapMotions.length];
+  const message = motion === 'sleep-react'
+    ? '团团在小窝里轻轻动了动耳朵，又安心趴好了。'
+    : motion === 'greet'
+      ? '团团站起来合起小爪，认真向你拜一拜。'
+      : motion === 'groom'
+        ? '团团舔舔小爪，慢悠悠地理了理毛。'
+        : longPress
+          ? '我在。今天慢一点也完全可以。'
+          : '摸摸收到啦。今天无论做多少，我都陪着你。';
+  addPetEvent('companion', message);
   persist();
-  const sleeping = $('[data-action="pet"]')?.dataset.roamState === 'sleeping';
-  const tapMotions = ['tilt', 'blink', 'hop'];
-  const motion = longPress ? 'petting' : sleeping ? 'sleep-react' : tapMotions[petTapSequence++ % tapMotions.length];
-  playPetMotion(motion, longPress ? 1180 : 780);
-  notify(longPress ? '团团在这里陪你慢一会儿。' : '留下了一条温柔的共同回忆。');
+  playPetMotion(motion, lively ? 1260 : longPress ? 1180 : 780);
+  notify(motion === 'sleep-react' ? '团团没有被吵醒。' : motion === 'groom' ? '团团认真舔了舔小爪。' : motion === 'greet' ? '团团向你拜了一拜。' : longPress ? '团团在这里陪你慢一会儿。' : '留下了一条温柔的共同回忆。');
 }
 
 function linesFromForm(data, group) {
@@ -500,6 +641,7 @@ function captureMealDraftFromForm(form = $('#meal-form'), invalidateEstimate = f
   const data = new FormData(form);
   Object.assign(draft, {
     food: data.get('food') || '',
+    mealType: data.get('mealType') || draft.mealType || 'snack',
     portion: data.get('portion') || '',
     cookingMethod: data.get('cookingMethod') || 'unknown',
     portionScale: Number(data.get('portionScale')) || 100,
@@ -513,7 +655,11 @@ function captureMealDraftFromForm(form = $('#meal-form'), invalidateEstimate = f
   return draft;
 }
 
-async function analyzePendingMeal() {
+function mealFormForTarget(target) {
+  return target?.closest('#meal-form') || $('#meal-form');
+}
+
+function analyzePendingMeal() {
   mealAnalysisError = '公开展示版不提供 AI 识别；照片仅在本机处理，请手动填写。';
   render();
 }
@@ -557,6 +703,7 @@ async function saveMeal(form) {
         const previousPhotoId = item.photoId;
         Object.assign(item, {
           food: data.get('food').trim(), portion: data.get('portion').trim(), cookingMethod: draft.cookingMethod, portionScale: draft.portionScale,
+          mealType: draft.mealType || 'snack',
           notes: data.get('notes').trim(), actionPractice: data.get('practice'), ingredients: draft.ingredients,
           fatsAndSauces: draft.fatsAndSauces, nutritionEstimate: draft.nutritionEstimate,
           aiAnalysis: draft.aiAnalysis || null, source, updatedAt: at,
@@ -571,7 +718,7 @@ async function saveMeal(form) {
         successMessage = '修改已保存，请重新确认相关饮食任务结果。';
       } else {
         const result = commitMealOnce(target.state, {
-          clientSubmissionId: draft.clientSubmissionId, date: target.date, food: data.get('food'), portion: data.get('portion'),
+          clientSubmissionId: draft.clientSubmissionId, date: target.date, food: data.get('food'), mealType: draft.mealType, portion: data.get('portion'),
           portionScale: draft.portionScale, notes: data.get('notes'), actionPractice: data.get('practice'), ingredients: draft.ingredients,
           fatsAndSauces: draft.fatsAndSauces, aiAnalysis: draft.aiAnalysis || null, nutritionEstimate: draft.nutritionEstimate,
           source, planVersion: target.planVersion, photoId: stagedPhotoId,
@@ -668,6 +815,7 @@ function handleClick(event) {
   if (action === 'room-task-open') { modal = 'room-task'; renderOverlay(); return; }
   if (action === 'room-meal-open') { modal = 'room-meal'; render(); return; }
   if (action === 'room-activity-open') { modal = 'room-activity'; render(); return; }
+  if (action === 'body-open') { state.ui.view = 'body'; modal = null; persist(); render(); $('#scroll').scrollTop = 0; return; }
   if (action === 'room-memory-open') { modal = 'room-memory'; renderOverlay(); return; }
   if (action === 'room-activity-cancel') { state.drafts.activity = {}; modal = null; persist(); render(); notify('已取消，没有创建活动记录。'); return; }
   if (action === 'rest-open') { modal = 'rest'; renderOverlay(); return; }
@@ -684,11 +832,26 @@ function handleClick(event) {
   if (action === 'timer-toggle') { state.timer.running ? pauseTimer(state.timer) : startTimer(state.timer); state.drafts.activity.source = 'timer'; persist(); render(); return; }
   if (action === 'timer-use') { const input = $('#activity-form [name="minutes"]'); input.value = Math.max(1, Math.floor(timerElapsedMs(state.timer) / 60000)); state.drafts.activity.minutes = input.value; state.drafts.activity.source = 'timer'; persist(); notify('已按累计完整分钟填入，保存后才会成为活动记录。'); return; }
   if (action === 'timer-reset') { resetTimer(state.timer); state.drafts.activity.source = 'manual'; persist(); render(); return; }
-  if (action === 'meal-analyze') { analyzePendingMeal(); return; }
+  if (action === 'meal-analyze') { analyzePendingMeal(target.closest('#meal-form') || $('#meal-form')); return; }
+  if (action === 'meal-copy-recent') { copyRecentMeal(); return; }
+  if (action === 'meal-template-apply') { applySelectedMealTemplate(); return; }
+  if (action === 'meal-template-save-draft') {
+    const form = mealFormForTarget(target);
+    const draft = captureMealDraftFromForm(form);
+    saveMealTemplateFrom(draft);
+    return;
+  }
+  if (action === 'meal-template-save-record') {
+    const item = state.meals.find((record) => record.id === target.dataset.id);
+    if (item) saveMealTemplateFrom(item);
+    return;
+  }
+  if (action === 'meal-template-rename') { renameMealTemplate(target); return; }
+  if (action === 'meal-template-delete') { deleteMealTemplate(target.dataset.id); return; }
   if (action === 'photo-remove') { const draft = ensureMealDraft(); draft.removePhoto = true; draft.photoChanged = false; clearPendingPhoto(); mealAnalysisError = ''; persist(); render(); notify('照片已从当前草稿移除，尚未改变已保存记录。'); return; }
-  if (action === 'meal-line-add') { const draft = captureMealDraftFromForm(); draft[target.dataset.group].push({ name:'', foodKey:'unknown', gramsMin:null, gramsMax:null, confidence:'low', origin:'user-edited' }); draft.nutritionEstimate = null; persist(); render(); return; }
-  if (action === 'meal-line-remove') { const draft = captureMealDraftFromForm(); draft[target.dataset.group].splice(Number(target.dataset.index), 1); draft.nutritionEstimate = null; persist(); render(); return; }
-  if (action === 'meal-reestimate') { const draft = captureMealDraftFromForm(); draft.nutritionEstimate = estimateMealNutrition(draft); persist(); render(); notify(draft.nutritionEstimate.range ? '已按当前食材和份量重新计算区间。' : '还缺可映射的食材或克数，暂无法计算。'); return; }
+  if (action === 'meal-line-add') { const draft = captureMealDraftFromForm(mealFormForTarget(target)); draft[target.dataset.group].push({ name:'', foodKey:'unknown', gramsMin:null, gramsMax:null, confidence:'low', origin:'user-edited' }); draft.nutritionEstimate = null; persist(); render(); return; }
+  if (action === 'meal-line-remove') { const draft = captureMealDraftFromForm(mealFormForTarget(target)); draft[target.dataset.group].splice(Number(target.dataset.index), 1); draft.nutritionEstimate = null; persist(); render(); return; }
+  if (action === 'meal-reestimate') { const draft = captureMealDraftFromForm(mealFormForTarget(target)); draft.nutritionEstimate = estimateMealNutrition(draft); persist(); render(); notify(draft.nutritionEstimate.range ? '已按当前食材和份量重新计算区间。' : '还缺可映射的食材或克数，暂无法计算。'); return; }
   if (action === 'meal-cancel') { const returnToRoom = modal === 'room-meal'; state.drafts.meal = {}; mealAnalysisError = ''; clearPendingPhoto(); if (returnToRoom) modal = null; persist(); render(); notify('已取消，没有创建餐食记录。'); return; }
   if (action === 'cancel-edit') {
     const mealContext = Boolean(target.closest('#meal-form')) || modal === 'room-meal' || state.ui.view === 'meal';
@@ -698,6 +861,9 @@ function handleClick(event) {
   }
   if (action === 'meal-edit') { const item = state.meals.find((record)=>record.id===target.dataset.id); if (item) { if (modal === 'room-memory') modal = 'room-meal'; beginMealEdit(item); } return; }
   if (action === 'activity-edit') { const item = state.activities.find((record)=>record.id===target.dataset.id); if (item) { if (modal === 'room-memory') modal = 'room-activity'; state.drafts.activity = { editId:item.id, type:item.type, minutes:item.minutes, feeling:item.feeling, source:item.source }; persist(); render(); } return; }
+  if (action === 'body-edit') { const item = state.bodyMeasurements.find((record) => record.id === target.dataset.id); if (item) { state.drafts.bodyMeasurement = { ...item, editId: item.id }; persist(); render(); } return; }
+  if (action === 'body-cancel') { state.drafts.bodyMeasurement = {}; persist(); render(); return; }
+  if (action === 'body-delete') { modal = `delete:body:${target.dataset.id}`; renderOverlay(); return; }
   if (action === 'meal-delete' || action === 'activity-delete') { modal = `delete:${action.startsWith('meal')?'meal':'activity'}:${target.dataset.id}`; renderOverlay(); return; }
   if (action === 'delete-confirm') { deleteConfirmed(); return; }
   if (action === 'ending-preview') { endingPreview = target.dataset.ending; render(); return; }
@@ -711,18 +877,30 @@ function deleteConfirmed() {
     const item = state.meals.find((record) => record.id === id);
     state.meals = state.meals.filter((record) => record.id !== id);
     if (item) { invalidateDietConfirmation(state, item.date, at); if (item.photoId) deletePhoto(item.photoId); }
-  } else {
+  } else if (type === 'activity') {
     const item = state.activities.find((record) => record.id === id);
     state.activities = state.activities.filter((record) => record.id !== id);
     if (item) reconcileActivityTask(state, item.date, at);
+  } else if (type === 'body') {
+    const result = commitLocalStateMutation(state, () => {
+      state.bodyMeasurements = state.bodyMeasurements.filter((record) => record.id !== id);
+    }, persist);
+    if (!result.persisted) { notify('本地存储写入失败，身体记录未删除。'); return; }
   }
-  modal = null; persist(); render(); notify('记录已删除，统计和任务状态已同步更新；历史奖励账本保留。');
+  modal = null; persist(); render(); notify(type === 'body' ? '身体记录已删除。' : '记录已删除，统计和任务状态已同步更新；历史奖励账本保留。');
 }
 
 function handleSubmit(event) {
   event.preventDefault();
   const form = event.target;
   if (!form.reportValidity()) return;
+  if (form.id === 'calorie-target-form') {
+    const value = new FormData(form).get('target');
+    const target = value === '' ? null : Number(value);
+    if (target !== null && (!Number.isInteger(target) || target < 500 || target > 10000)) { notify('目标需为 500–10000 kcal 的整数。'); return; }
+    state.settings.dailyCalorieTarget = target;
+    persist(); render(); notify(target ? '每日目标已保存。' : '每日目标已清除。'); return;
+  }
   if (form.id === 'setup-form') {
     const data = new FormData(form);
     const fresh = initialState({ mode, setupComplete: true, petName: data.get('petName').trim() || '团团', focus: data.get('focus'), movement: data.get('movement'), duration: Number(data.get('duration')) });
@@ -746,6 +924,39 @@ function handleSubmit(event) {
     form.querySelector('button[type="submit"]').disabled = true;
     saveActivity(form);
     return;
+  }
+  if (form.id === 'body-form') {
+    const data = new FormData(form);
+    const toValue = (name, max) => {
+      const value = data.get(name);
+      if (value === '') return null;
+      const number = Number(value);
+      return Number.isFinite(number) && number > 0 && number <= max ? number : undefined;
+    };
+    const weightKg = toValue('weightKg', 500), waistCm = toValue('waistCm', 300), hipCm = toValue('hipCm', 400);
+    if ([weightKg, waistCm, hipCm].includes(undefined)) { notify('请输入合理的正数，或留空。'); return; }
+    if (weightKg === null && waistCm === null && hipCm === null) { notify('请至少填写体重、腰围或臀围中的一项。'); return; }
+    const date = String(data.get('date'));
+    const editId = form.dataset.editId;
+    const editing = state.bodyMeasurements.find((item) => item.id === editId);
+    const sameDate = state.bodyMeasurements.find((item) => item.date === date);
+    if (editing && sameDate && sameDate.id !== editing.id) { notify('该日期已有一条身体记录；请先编辑那一条。'); return; }
+    const existing = editing || sameDate;
+    const record = normalizeBodyMeasurement({
+      ...(existing || {}), id: existing?.id || uid('body'), date,
+      weightKg: data.get('clearWeight') ? null : weightKg === null && existing ? existing.weightKg : weightKg,
+      waistCm: data.get('clearWaist') ? null : waistCm === null && existing ? existing.waistCm : waistCm,
+      hipCm: data.get('clearHip') ? null : hipCm === null && existing ? existing.hipCm : hipCm,
+      createdAt: existing?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString(),
+    });
+    if (!record) { notify('请至少保留一项有效数值。'); return; }
+    const transaction = commitLocalStateMutation(state, () => {
+      if (existing) Object.assign(existing, record);
+      else state.bodyMeasurements.push(record);
+      state.drafts.bodyMeasurement = {};
+    }, persist);
+    if (!transaction.persisted) { notify('本地存储写入失败，身体记录尚未保存。'); return; }
+    render(); notify(existing ? '该日期的身体记录已更新。' : '身体记录已保存在本机。'); return;
   }
   if (form.id === 'plan-form') {
     const data = new FormData(form);
@@ -771,7 +982,8 @@ function handleInput(event) {
     const draft = captureMealDraftFromForm(form, nutritionField);
     if (nutritionField) {
       draft.nutritionEstimate = estimateMealNutrition(draft);
-      const estimateCard = $('#meal-nutrition-estimate');
+      const formRoot = form.closest('.room-flow-sheet') || page;
+      const estimateCard = $('#meal-nutrition-estimate', formRoot);
       if (estimateCard) estimateCard.innerHTML = nutritionEstimateHtml(draft.nutritionEstimate);
     }
   }
@@ -784,7 +996,7 @@ function handleChange(event) {
   const file = event.target.files?.[0];
   if (!file) return;
   event.target.value = '';
-  selectMealPhoto(file).catch((error) => {
+  selectMealPhoto(file, mealFormForTarget(event.target)).catch((error) => {
     console.error('照片处理失败', error);
     notify(error?.message || '照片无法处理，请更换 JPEG、PNG 或 WebP。');
   });
@@ -796,7 +1008,7 @@ async function beginMealEdit(item) {
   clearPendingPhoto();
   mealAnalysisError = '';
   state.drafts.meal = {
-    clientSubmissionId: item.clientSubmissionId || uid('meal-submit'), editId:item.id, food:item.food, portion:item.portion,
+    clientSubmissionId: item.clientSubmissionId || uid('meal-submit'), editId:item.id, food:item.food, mealType:item.mealType || 'snack', portion:item.portion,
     cookingMethod:item.cookingMethod || 'unknown', portionScale:item.portionScale || 100, notes:item.notes, practice:item.actionPractice,
     ingredients:item.ingredients || [], fatsAndSauces:item.fatsAndSauces || [], aiAnalysis:item.aiAnalysis || null,
     nutritionEstimate:item.nutritionEstimate || null, existingPhotoId:item.photoId || null, photoChanged:false, removePhoto:false,
@@ -809,6 +1021,83 @@ async function beginMealEdit(item) {
     || state.drafts.meal.editId !== item.id || state.drafts.meal.photoChanged || state.drafts.meal.removePhoto) return;
   setPendingPhoto(blob, false);
   render();
+}
+
+function copyRecentMeal() {
+  const source = [...state.meals].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  if (!source) return;
+  const currentDraft = state.drafts.meal || {};
+  if ((currentDraft.food || currentDraft.notes || currentDraft.editId) && !window.confirm('以最近一餐开始新记录？当前草稿不会保留。')) return;
+  cancelMealAnalysis();
+  clearPendingPhoto();
+  state.drafts.meal = {
+    clientSubmissionId: uid('meal-submit'), food: source.food, mealType: source.mealType || 'snack',
+    portion: source.portion || '', cookingMethod: source.cookingMethod || 'unknown', portionScale: source.portionScale || 100,
+    notes: '', practice: 'unknown', ingredients: structuredClone(source.ingredients || []),
+    fatsAndSauces: structuredClone(source.fatsAndSauces || []), nutritionEstimate: source.nutritionEstimate || null,
+    aiAnalysis: null, existingPhotoId: null, photoChanged: false, removePhoto: false,
+  };
+  persist(); render(); notify('已复制为新草稿；核对后需再次确认保存。');
+}
+
+function saveMealTemplateFrom(source) {
+  if ((state.mealTemplates || []).length >= 50) { notify('常吃餐最多保存 50 个；请先删除不再使用的模板。'); return; }
+  const at = new Date().toISOString();
+  const template = createMealTemplate(source, { at });
+  if (!template) { notify('请先填写餐食名称，再收藏为常吃餐。'); return; }
+  const transaction = commitLocalStateMutation(state, () => {
+    state.mealTemplates ||= [];
+    state.mealTemplates.unshift(template);
+    return template;
+  }, persist);
+  if (!transaction.persisted) { notify('本地空间不足，常吃餐未保存。'); return; }
+  render(); notify(`已收藏「${template.name}」；照片、备注和 AI 图片分析未写入模板。`);
+}
+
+function applySelectedMealTemplate() {
+  const select = $('#meal-template-select');
+  const percentInput = $('#meal-template-percent');
+  const template = (state.mealTemplates || []).find((item) => item.id === select?.value);
+  if (!template) { notify('请选择一个常吃餐。'); return; }
+  const percent = Number(percentInput?.value);
+  if (!Number.isFinite(percent) || percent < 10 || percent > 300) { notify('本次份量需为模板的 10%–300%。'); return; }
+  const form = $('#meal-form');
+  if (form) captureMealDraftFromForm(form);
+  const currentDraft = state.drafts.meal || {};
+  const hasDraft = Boolean(currentDraft.food || currentDraft.notes || currentDraft.editId || currentDraft.ingredients?.length || pendingPhoto);
+  if (hasDraft && !window.confirm('套用常吃餐会替换当前草稿。继续吗？')) return;
+  const draft = draftFromMealTemplate(template, percent, uid('meal-submit'));
+  if (!draft) { notify('这个常吃餐无法读取，请删除后重新收藏。'); return; }
+  draft.nutritionEstimate = estimateMealNutrition(draft);
+  const transaction = commitLocalStateMutation(state, () => { state.drafts.meal = draft; }, persist);
+  if (!transaction.persisted) { notify('本地空间不足，当前草稿仍保留，常吃餐未套用。'); return; }
+  cancelMealAnalysis();
+  clearPendingPhoto();
+  mealAnalysisError = '';
+  render(); notify(`已套用「${template.name}」并按 ${percent}% 调整；核对后确认保存才会创建餐食。`);
+}
+
+function renameMealTemplate(target) {
+  const template = (state.mealTemplates || []).find((item) => item.id === target.dataset.id);
+  const input = target.closest('[data-template-row]')?.querySelector('input');
+  const name = String(input?.value || '').trim().slice(0, 80);
+  if (!template || !name) { notify('常吃餐名称不能为空。'); return; }
+  const transaction = commitLocalStateMutation(state, () => {
+    template.name = name;
+    template.updatedAt = new Date().toISOString();
+  }, persist);
+  if (!transaction.persisted) { notify('本地空间不足，名称未修改。'); return; }
+  render(); notify('常吃餐名称已修改。');
+}
+
+function deleteMealTemplate(id) {
+  const template = (state.mealTemplates || []).find((item) => item.id === id);
+  if (!template || !window.confirm(`删除常吃餐「${template.name}」？已保存的餐食不会改变。`)) return;
+  const transaction = commitLocalStateMutation(state, () => {
+    state.mealTemplates = state.mealTemplates.filter((item) => item.id !== id);
+  }, persist);
+  if (!transaction.persisted) { notify('本地空间不足，常吃餐未删除。'); return; }
+  render(); notify('常吃餐已删除；原餐食记录保留。');
 }
 
 function loadImageElement(blob) {
@@ -853,8 +1142,8 @@ function setPendingPhoto(blob, changed = true) {
   draft.removePhoto = false;
 }
 
-async function selectMealPhoto(file) {
-  const draft = captureMealDraftFromForm();
+async function selectMealPhoto(file, form = $('#meal-form')) {
+  const draft = captureMealDraftFromForm(form);
   const target = { state, mode, submissionId: draft.clientSubmissionId };
   const token = ++photoSelectionToken;
   notify('正在本机压缩照片…');
@@ -924,7 +1213,9 @@ phone.addEventListener('submit', handleSubmit);
 phone.addEventListener('input', handleInput);
 phone.addEventListener('change', handleChange);
 phone.addEventListener('error', (event) => {
-  activatePetFallback(event.target);
+  const lifeAssetFailed = Boolean(event.target?.closest?.('.pet-life-candidate'));
+  const activated = activatePetFallback(event.target);
+  if (activated && lifeAssetFailed) event.target.closest?.('[data-action="pet"]')?.dispatchEvent(new CustomEvent('pet-life-assets-failed'));
 }, true);
 phone.addEventListener('pointerdown', (event) => {
   const pet = event.target.closest('[data-action="pet"]');

@@ -8,6 +8,14 @@ export const ROOM_ENTRYPOINTS = Object.freeze({
   memory: Object.freeze({ action: 'room-memory-open', label: '打开回忆柜' }),
 });
 
+export const ROOM_ART_ASSETS = Object.freeze({
+  backdrop: 'assets/pet/room-interior-reference-v1.webp',
+  rug: 'assets/pet/room-rug-reference-v1.webp',
+  nest: 'assets/pet/room-nest-reference-v1.webp',
+  meal: 'assets/pet/room-meal-table-reference-v1.webp',
+  shoes: 'assets/pet/room-shoes-reference-v1.webp',
+});
+
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -43,7 +51,7 @@ export function createRoomHomeModel({
   });
 }
 
-export function roomHomeHtml({ model, petHtml, feedbackHtml = '', prototypeChrome = '', petMotionClass = '' }) {
+export function roomHomeHtml({ model, petHtml, feedbackHtml = '', prototypeChrome = '', petMotionClass = '', summaryHtml = '' }) {
   const taskIcon = model.taskType === 'diet' ? '🥬' : model.taskType === 'activity' ? '👟' : '📖';
   const petName = escapeHtml(model.petName);
   const taskTitle = escapeHtml(model.taskTitle);
@@ -51,35 +59,39 @@ export function roomHomeHtml({ model, petHtml, feedbackHtml = '', prototypeChrom
   const taskStatusLabel = escapeHtml(model.taskStatusLabel);
   const motionClass = escapeHtml(petMotionClass);
   return `<section class="room-home" aria-label="${petName}的小屋">
+    <div class="scene-backdrop" data-room-layer="0" aria-hidden="true">
+      <img class="room-backdrop-art" src="${ROOM_ART_ASSETS.backdrop}" alt="">
+    </div>
     <div class="room-world pet-scene" data-room-layer-root>
-      <div class="scene-backdrop" data-room-layer="0" aria-hidden="true">
-        <div class="room-sunlight"></div><div class="room-window"><i></i><i></i></div>
-        <div class="room-wall-trim"></div><div class="room-floor"></div><div class="room-rug"></div>
+      <div class="room-ground" data-room-layer="1" aria-hidden="true">
+        <img class="room-rug-art" src="${ROOM_ART_ASSETS.rug}" alt="">
       </div>
-      <div class="room-props" data-room-layer="1">
-        <button class="room-hotspot room-note" type="button" data-action="${ROOM_ENTRYPOINTS.task.action}" aria-label="${ROOM_ENTRYPOINTS.task.label}：${taskTitle}">
-          <span class="room-note-pin" aria-hidden="true"></span><small>今日便签</small><strong>${taskIcon} ${taskTitle}</strong><span class="status ${taskStatus}">${taskStatusLabel}</span>
-        </button>
+      <div class="room-props" data-room-layer="2">
+        <div class="room-mantra-note" aria-hidden="true"><span class="room-note-pin"></span><strong>今天，<br>我们只做<br>一件小事。</strong><i>♡</i></div>
         <button class="room-hotspot room-cabinet" type="button" data-action="${ROOM_ENTRYPOINTS.memory.action}" aria-label="${ROOM_ENTRYPOINTS.memory.label}">
-          <span class="cabinet-plant" aria-hidden="true">♧</span><span class="cabinet-photo" aria-hidden="true">♡</span><span class="cabinet-shelf" aria-hidden="true"></span><span class="hotspot-label">回忆柜</span>
+          <span class="cabinet-photo" aria-hidden="true"><i>♡</i></span><span class="hotspot-label"><b aria-hidden="true">▧</b> 回忆</span>
         </button>
         <button class="room-hotspot room-meal-table" type="button" data-action="${ROOM_ENTRYPOINTS.meal.action}" aria-label="${ROOM_ENTRYPOINTS.meal.label}，拍照或手工记录一餐">
-          <span class="bowl-visual" aria-hidden="true"><i></i></span><span class="hotspot-label">鉴饭台</span>
+          <img class="room-prop-image" src="${ROOM_ART_ASSETS.meal}" alt=""><span class="hotspot-label"><b aria-hidden="true">◉</b> 鉴饭台</span>
         </button>
         <button class="room-hotspot room-nest" type="button" data-action="${ROOM_ENTRYPOINTS.rest.action}" aria-label="${ROOM_ENTRYPOINTS.rest.label}">
-          <span class="nest-visual" aria-hidden="true"><i></i></span><span class="hotspot-label">小窝</span>
+          <img class="room-prop-image" src="${ROOM_ART_ASSETS.nest}" alt=""><span class="hotspot-label"><b aria-hidden="true">⌂</b> 小窝</span>
         </button>
         <button class="room-hotspot room-shoes" type="button" data-action="${ROOM_ENTRYPOINTS.activity.action}" aria-label="${ROOM_ENTRYPOINTS.activity.label}">
-          <span class="shoes-visual" aria-hidden="true"><i></i><i></i></span><span class="hotspot-label">运动角</span>
+          <img class="room-prop-image" src="${ROOM_ART_ASSETS.shoes}" alt=""><span class="hotspot-label"><b aria-hidden="true">⌁</b> 运动角</span>
         </button>
       </div>
-      <div class="world-anchors" data-room-layer="2" aria-hidden="true"><span class="pet-shadow"></span><span class="room-yarn"></span></div>
       <div class="room-pet-layer" data-room-layer="3">
         ${prototypeChrome}
-        <button class="pet-button ${model.paused ? 'rest' : 'companion'}${motionClass ? ` ${motionClass}` : ''}" type="button" data-action="pet" aria-label="摸摸${petName}">${petHtml}</button>
+        <span class="pet-shadow" aria-hidden="true"></span><span class="room-yarn" aria-hidden="true"></span><button class="pet-button ${model.paused ? 'rest' : 'companion'}${motionClass ? ` ${motionClass}` : ''}" type="button" data-action="pet" aria-label="摸摸${petName}">${petHtml}</button>
       </div>
       <div class="room-feedback" data-room-layer="4" aria-live="polite">${feedbackHtml}</div>
     </div>
-    <p class="room-discovery" aria-hidden="true">轻点房间里的小物件，看看今天想做什么</p>
+    <div class="room-bottom-panel">
+      <button class="room-hotspot room-task-paper" type="button" data-action="${ROOM_ENTRYPOINTS.task.action}" aria-label="${ROOM_ENTRYPOINTS.task.label}：${taskTitle}">
+        <span class="room-task-title"><b aria-hidden="true">▣</b> 今日任务</span><strong>${taskIcon} ${taskTitle}</strong><span class="status ${taskStatus}">${taskStatusLabel}</span><i aria-hidden="true">›</i>
+      </button>
+      ${summaryHtml}
+    </div>
   </section>`;
 }
