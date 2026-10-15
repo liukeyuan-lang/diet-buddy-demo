@@ -13,6 +13,7 @@ import { mountPetLife } from './pet-life.mjs';
 import { createRoomHomeModel, roomHomeHtml } from './room-home.mjs';
 import { NUTRITION_FOODS, NUTRITION_SOURCE, estimateMealNutrition, normalizeEstimateLine } from './nutrition.mjs';
 import { commitLocalStateMutation } from './local-state-transaction.mjs';
+import { applyDietTaskConfirmation, dietTaskForMealConfirmation } from './meal-flow.mjs';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const page = $('#page');
@@ -171,10 +172,7 @@ function roomFeedbackHtml() {
   return `<div class="room-feedback-bubble ${esc(roomFeedback.kind)}"><button type="button" data-action="feedback-close" aria-label="关闭团团的话">×</button>${esc(roomFeedback.message)}</div>`;
 }
 
-function addPetEvent(kind, message, sourceId = null) {
-  const eventId = sourceId ? `pet:${kind}:${sourceId}` : `pet:${kind}:${uid('event')}`;
-  if (state.petEvents.some((item) => item.eventId === eventId)) return false;
-  state.petEvents.push({ id: uid('pet'), eventId, kind, message, date: currentDate(), sourceId, source: 'user-action', planVersion: currentTask()?.planVersion || plan().version, createdAt: new Date().toISOString() });
+function presentRoomFeedback(kind, message) {
   roomFeedback = { kind, message };
   clearTimeout(roomFeedbackTimer);
   roomFeedbackTimer = setTimeout(() => {
@@ -184,6 +182,13 @@ function addPetEvent(kind, message, sourceId = null) {
   }, 4200);
   const layer = $('.room-feedback');
   if (layer) layer.innerHTML = roomFeedbackHtml();
+}
+
+function addPetEvent(kind, message, sourceId = null, { present = true } = {}) {
+  const eventId = sourceId ? `pet:${kind}:${sourceId}` : `pet:${kind}:${uid('event')}`;
+  if (state.petEvents.some((item) => item.eventId === eventId)) return false;
+  state.petEvents.push({ id: uid('pet'), eventId, kind, message, date: currentDate(), sourceId, source: 'user-action', planVersion: currentTask()?.planVersion || plan().version, createdAt: new Date().toISOString() });
+  if (present) presentRoomFeedback(kind, message);
   return true;
 }
 
@@ -281,12 +286,20 @@ function mealHtml() {
   const date = currentDate();
   const draft = ensureMealDraft();
   const items = state.meals.filter((item) => item.date === date).sort((a,b) => b.createdAt.localeCompare(a.createdAt));
+  const latest = [...state.meals].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const editing = draft.editId ? state.meals.find((item) => item.id === draft.editId) : null;
+  const taskDate = editing?.date || date;
+  const dietTask = dietTaskForMealConfirmation(state, taskDate);
+  const taskDayLabel = taskDate === date ? '今天' : dateLabel(taskDate);
   const photoMarkup = pendingPhotoUrl
     ? `<img src="${pendingPhotoUrl}" alt="待确认的餐食照片"><span class="photo-state">已在本机压缩 · 确认前不写入餐食</span>`
     : '<span class="picture-empty">📷<br><small>先拍照或从相册选择</small></span>';
   const estimate = nutritionEstimateHtml(draft.nutritionEstimate);
-  const recognized = draft.aiAnalysis ? `<div class="analysis-meta"><b>AI 图像线索 · ${confidenceLabel(draft.aiAnalysis.overallConfidence)}</b><span>${esc(providerLabel(draft.aiAnalysis))} · 模型 ${esc(draft.aiAnalysis.model || '未知')}</span></div>${draft.aiAnalysis.uncertainties?.length ? `<details class="note warning analysis-uncertainties"><summary>待核对信息（${draft.aiAnalysis.uncertainties.length} 项）</summary><small>${draft.aiAnalysis.uncertainties.map(esc).join('；')}</small></details>` : ''}` : '';
-  return `<span class="pill">🥣 饮食记录</span><h1 class="title">手动记下一餐，<br>确认权在你。</h1><div class="note">公开展示版不提供 AI 识别。照片只在本机预览和保存，不会发送到服务器或第三方；也可以不选照片，直接手动记录。</div><form id="meal-form" data-edit-id="${esc(draft.editId || '')}"><label class="form-label">餐食照片（可选）</label><div class="picture" id="photo-preview">${photoMarkup}</div><div class="photo-actions"><label class="btn secondary small">${pendingPhotoUrl ? '重新拍照' : '拍照'}<input type="file" id="meal-camera" accept="image/jpeg,image/png,image/webp" capture="environment" hidden></label><label class="btn ghost small">${pendingPhotoUrl ? '从相册替换' : '从相册选择'}<input type="file" id="meal-gallery" accept="image/jpeg,image/png,image/webp" hidden></label>${pendingPhotoUrl ? '<button class="btn danger small" type="button" data-action="photo-remove">取消照片</button>' : ''}</div><button class="btn peach block" type="button" data-action="meal-analyze" disabled>展示版不提供 AI 识别</button>${mealAnalysisError ? `<div class="inline-error" role="alert">${esc(mealAnalysisError)}<br><small>照片和草稿已保留在当前页面，可重试或继续手工填写。</small></div>` : ''}<div id="meal-nutrition-estimate">${estimate}</div><label class="form-label">食物 / 餐食名称 *</label><input class="field" name="food" required maxlength="80" value="${esc(draft.food || '')}" placeholder="例如：番茄鸡蛋面"><label class="form-label">份量描述（可选）</label><input class="field" name="portion" maxlength="120" value="${esc(draft.portion || '')}" placeholder="例如：一碗，大约 350–450 克"><label class="form-label">烹调方式（可选，用于粗估假设）</label><select class="field" name="cookingMethod"><option value="unknown" ${!draft.cookingMethod || draft.cookingMethod === 'unknown' ? 'selected' : ''}>不确定 / 先不补充</option><option value="pan_fried" ${draft.cookingMethod === 'pan_fried' ? 'selected' : ''}>煎 / 香煎</option><option value="steamed" ${draft.cookingMethod === 'steamed' ? 'selected' : ''}>清蒸 / 少油</option><option value="deep_fried" ${draft.cookingMethod === 'deep_fried' ? 'selected' : ''}>油炸</option></select><label class="form-label">份量系数（相对当前估算）</label><div class="portion-scale"><input class="field" name="portionScale" type="number" min="10" max="300" step="5" value="${esc(draft.portionScale || 100)}"><span>%</span></div><p class="hint">例如只吃了图中一半，改为 50%；重新估算只缩放一次整体区间。所有补充都是可选的，不补也可保存。</p><div class="section-heading compact">食材 <button class="btn ghost small" type="button" data-action="meal-line-add" data-group="ingredients">+添加</button></div>${mealLinesHtml(draft.ingredients, 'ingredients')}<div class="section-heading compact">油 / 酱料 <button class="btn ghost small" type="button" data-action="meal-line-add" data-group="fatsAndSauces">+添加</button></div>${mealLinesHtml(draft.fatsAndSauces, 'fatsAndSauces')}<button class="btn secondary block" type="button" data-action="meal-reestimate">按当前信息重新估算</button><button class="btn ghost block" type="button" data-action="meal-template-save-draft" style="margin-top:7px">收藏当前填写为常吃餐</button><label class="form-label">本次是否实践了约定行动？</label><div class="radio-row">${[['yes','有'],['no','没有'],['unknown','不确定']].map(([value,label]) => `<label class="radio-pill"><input type="radio" name="practice" value="${value}" ${(draft.practice || 'unknown') === value ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div><p class="hint">记录一餐不会自动判定整天任务，主任务仍由你单独确认。</p><label class="form-label">备注（可选）</label><textarea class="field" name="notes" rows="2" maxlength="240" placeholder="当时的感受、场景或想记住的事">${esc(draft.notes || '')}</textarea><button class="btn block" type="submit" style="margin-top:14px">${draft.editId ? '确认并保存修改' : '我已核对，确认保存这一餐'}</button><button class="btn ghost block" type="button" data-action="${draft.editId ? 'cancel-edit' : 'meal-cancel'}" style="margin-top:7px">${draft.editId ? '取消编辑' : '取消，不保存'}</button></form><div class="section-heading">${dateLabel(date)} <span>${items.length} 餐</span></div><div class="card">${items.length ? items.map(mealEntry).join('') : '<p class="lead">今天还没有餐食记录。没有填写不会自动算作未完成。</p>'}</div>`;
+  const recognized = '';
+  const optionalOpen = Boolean(draft.aiAnalysis || draft.ingredients.length || draft.fatsAndSauces.length || draft.notes || (draft.practice && draft.practice !== 'unknown'));
+  const quickStarts = !draft.editId ? `${mealTemplatesHtml()}${latest ? `<button class="btn secondary block meal-recent" type="button" data-action="meal-copy-recent">复制最近一餐（${esc(latest.food)}）</button>` : ''}` : '';
+  const taskConfirmation = dietTask ? `<fieldset class="meal-task-confirm"><legend>保存后，是否同时确认${esc(taskDayLabel)}的饮食任务？</legend><p>${esc(taskTitle(dietTask))}</p><div class="radio-row">${[['completed',`我确认${taskDayLabel}已完成`],['missed',`我确认${taskDayLabel}未完成`],['unknown','暂不确认']].map(([value,label]) => `<label class="radio-pill task-choice"><input type="radio" name="taskConfirmation" value="${value}" ${(draft.taskConfirmation || 'unknown') === value ? 'checked' : ''}><span>${esc(label)}</span></label>`).join('')}</div><small>这与“本餐实践”分开；只有你明确选择才会更新主任务。</small></fieldset>` : '';
+  return `<span class="pill">🥣 饮食记录</span><h1 class="title">记下这一餐，<br>细节可以慢慢补。</h1><p class="meal-intro">公开 DEMO 不提供 AI 识别；照片只在本机预览和保存，不会发送。</p>${quickStarts}<form id="meal-form" data-edit-id="${esc(draft.editId || '')}"><div class="meal-basics"><label class="form-label" for="meal-food">餐食名称 *</label><input class="field" id="meal-food" name="food" required maxlength="80" value="${esc(draft.food || '')}" placeholder="例如：番茄鸡蛋面"><label class="form-label" for="meal-type">餐次</label><select class="field" id="meal-type" name="mealType"><option value="breakfast" ${draft.mealType === 'breakfast' ? 'selected' : ''}>早餐</option><option value="lunch" ${draft.mealType === 'lunch' ? 'selected' : ''}>午餐</option><option value="dinner" ${draft.mealType === 'dinner' ? 'selected' : ''}>晚餐</option><option value="snack" ${!draft.mealType || draft.mealType === 'snack' ? 'selected' : ''}>加餐</option></select><label class="form-label" for="meal-portion">份量（可选）</label><input class="field" id="meal-portion" name="portion" maxlength="120" value="${esc(draft.portion || '')}" placeholder="例如：一碗、半份"></div><label class="form-label">餐食照片（可选）</label><div class="picture" id="photo-preview">${photoMarkup}</div><div class="photo-actions"><label class="btn secondary small">${pendingPhotoUrl ? '重新拍照' : '拍照'}<input type="file" id="meal-camera" accept="image/jpeg,image/png,image/webp" capture="environment" hidden></label><label class="btn ghost small">${pendingPhotoUrl ? '从相册替换' : '从相册选择'}<input type="file" id="meal-gallery" accept="image/jpeg,image/png,image/webp" hidden></label>${pendingPhotoUrl ? '<button class="btn danger small" type="button" data-action="photo-remove">取消照片</button>' : ''}</div><button class="btn peach block" type="button" data-action="meal-analyze" disabled>公开 DEMO 不提供 AI 识别</button>${mealAnalysisError ? `<div class="inline-error" role="alert">${esc(mealAnalysisError)}<br><small>照片和草稿已保留，可重试或手工填写。</small></div>` : ''}<div id="meal-nutrition-estimate">${estimate}</div>${taskConfirmation}<details class="meal-optional" ${optionalOpen ? 'open' : ''}><summary>补充食材、油酱与其他详情 <span>可选</span></summary>${recognized}<label class="form-label" for="meal-cooking">烹调方式</label><select class="field" id="meal-cooking" name="cookingMethod"><option value="unknown" ${!draft.cookingMethod || draft.cookingMethod === 'unknown' ? 'selected' : ''}>不确定 / 先不补充</option><option value="pan_fried" ${draft.cookingMethod === 'pan_fried' ? 'selected' : ''}>煎 / 香煎</option><option value="steamed" ${draft.cookingMethod === 'steamed' ? 'selected' : ''}>清蒸 / 少油</option><option value="deep_fried" ${draft.cookingMethod === 'deep_fried' ? 'selected' : ''}>油炸</option></select><label class="form-label" for="meal-scale">份量系数（相对当前估算）</label><div class="portion-scale"><input class="field" id="meal-scale" name="portionScale" type="number" min="10" max="300" step="5" value="${esc(draft.portionScale || 100)}"><span>%</span></div><div class="section-heading compact">食材 <button class="btn ghost small" type="button" data-action="meal-line-add" data-group="ingredients">+添加</button></div>${mealLinesHtml(draft.ingredients, 'ingredients')}<div class="section-heading compact">油 / 酱料 <button class="btn ghost small" type="button" data-action="meal-line-add" data-group="fatsAndSauces">+添加</button></div>${mealLinesHtml(draft.fatsAndSauces, 'fatsAndSauces')}<button class="btn secondary block" type="button" data-action="meal-reestimate">按当前信息重新估算</button><label class="form-label">本餐是否实践了约定行动？</label><div class="radio-row">${[['yes','有'],['no','没有'],['unknown','不确定']].map(([value,label]) => `<label class="radio-pill"><input type="radio" name="practice" value="${value}" ${(draft.practice || 'unknown') === value ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div><label class="form-label" for="meal-notes">备注（可选）</label><textarea class="field" id="meal-notes" name="notes" rows="2" maxlength="240" placeholder="当时的感受或场景">${esc(draft.notes || '')}</textarea><button class="btn ghost block" type="button" data-action="meal-template-save-draft">收藏当前填写为常吃餐</button></details><div class="meal-actions"><button class="btn block meal-save" type="submit">${draft.editId ? '保存修改' : '保存这一餐'}</button><button class="btn ghost block" type="button" data-action="${draft.editId ? 'cancel-edit' : 'meal-cancel'}">${draft.editId ? '取消编辑' : '取消，不保存'}</button></div></form><div class="section-heading">${dateLabel(date)} <span>${items.length} 餐</span></div><div class="card">${items.length ? items.map(mealEntry).join('') : '<p class="lead">今天还没有餐食记录。没有填写不会自动算作未完成。</p>'}</div>`;
 }
 
 function formatRange(range, digits = 1) {
@@ -325,7 +338,7 @@ function mealTemplatesHtml() {
   const templates = state.mealTemplates || [];
   const options = templates.map((template) => `<option value="${esc(template.id)}">${esc(template.name)} · ${esc(template.portion || '默认份量')}</option>`).join('');
   const manage = templates.map((template) => `<div class="template-manage-row" data-template-row="${esc(template.id)}"><input class="field" maxlength="80" value="${esc(template.name)}" aria-label="常吃餐名称"><button class="btn ghost small" type="button" data-action="meal-template-rename" data-id="${esc(template.id)}">改名</button><button class="btn danger small" type="button" data-action="meal-template-delete" data-id="${esc(template.id)}">删除</button></div>`).join('');
-  return `<section class="meal-templates"><div class="row"><strong>常吃餐</strong><span>${templates.length} 个本地模板</span></div>${templates.length ? `<div class="template-apply"><select class="field" id="meal-template-select" aria-label="选择常吃餐">${options}</select><label>本次相对模板份量 <span><input class="field" id="meal-template-percent" type="number" min="10" max="300" step="5" value="100">%</span></label><button class="btn secondary" type="button" data-action="meal-template-apply">套用到草稿</button></div><details><summary>管理常吃餐</summary>${manage}</details>` : '<p>可从已保存餐食或当前填写收藏。模板只保留餐名、餐次、份量与食材克数，不保存照片、备注或 AI 图片分析。</p>'}</section>`;
+  return `<section class="meal-templates"><div class="row"><strong>常吃餐</strong><span>${templates.length} 个本地模板</span></div>${templates.length ? `<div class="template-apply"><select class="field" id="meal-template-select" aria-label="选择常吃餐">${options}</select><label>本次相对模板份量 <span><input class="field" id="meal-template-percent" type="number" min="10" max="300" step="5" value="100">%</span></label><button class="btn secondary" type="button" data-action="meal-template-apply">套用到草稿</button></div><details><summary>管理常吃餐</summary>${manage}</details>` : '<p>还没有常吃餐；保存后可一键收藏。</p>'}</section>`;
 }
 
 function enhanceMealPage(root = page) {
@@ -335,23 +348,7 @@ function enhanceMealPage(root = page) {
   const summary = todayMealSummary(state, date);
   const dailyNutrition = dailyNutritionSummary(state, date);
   const trend = nutritionWeekTrend(state, date);
-  const latest = [...state.meals].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-  const heading = $('.pill', root);
-  heading.insertAdjacentHTML('afterend', `<section class="meal-summary"><strong>今日摘要</strong><span>${summary.mealCount} 餐已确认</span><span>${summary.kcalRange ? `${summary.kcalRange.min}–${summary.kcalRange.max} kcal` : '暂无已录餐食完整热量区间'}</span><span>${summary.unconfirmedIngredients} 项食材待确认</span>${summary.remainingRange ? `<span>剩余目标 ${summary.remainingRange.min}–${summary.remainingRange.max} kcal</span>` : ''}</section>${dailyNutritionHtml(dailyNutrition)}${nutritionWeekHtml(trend)}<form id="calorie-target-form" class="target-form"><label class="form-label" for="daily-calorie-target">每日热量目标（可选）</label><div class="target-input"><input class="field" id="daily-calorie-target" name="target" type="number" min="500" max="10000" step="50" value="${esc(state.settings.dailyCalorieTarget || '')}" placeholder="留空表示不设置"><button class="btn ghost small" type="submit">保存目标</button></div><small class="hint">仅按已保存餐食估算剩余区间，不扣除运动消耗。</small></form>${mealTemplatesHtml()}${latest && !form.dataset.editId ? `<button class="btn secondary block" type="button" data-action="meal-copy-recent">复制最近一餐（${esc(latest.food)}）</button>` : ''}`);
-  const foodInput = form.querySelector('[name="food"]');
-  const type = document.createElement('label');
-  type.className = 'form-label';
-  type.textContent = '餐食类型';
-  const select = document.createElement('select');
-  select.className = 'field'; select.name = 'mealType';
-  select.innerHTML = '<option value="breakfast">早餐</option><option value="lunch">午餐</option><option value="dinner">晚餐</option><option value="snack">加餐</option>';
-  select.value = state.drafts.meal?.mealType || 'snack';
-  if (foodInput) { foodInput.before(select); foodInput.before(type); }
-  form.querySelectorAll('[data-action="meal-edit"]').forEach((button) => {
-    const item = state.meals.find((meal) => meal.id === button.dataset.id);
-    const title = button.closest('.list-entry')?.querySelector('strong');
-    if (item && title) title.insertAdjacentHTML('beforeend', ` <small>${({breakfast:'早餐',lunch:'午餐',dinner:'晚餐',snack:'加餐'})[item.mealType || 'snack']}</small>`);
-  });
+  form.insertAdjacentHTML('afterend', `<details class="meal-insights"><summary>今日摘要、营养趋势与热量目标</summary><section class="meal-summary"><strong>今日摘要</strong><span>${summary.mealCount} 餐已确认</span><span>${summary.kcalRange ? `${summary.kcalRange.min}–${summary.kcalRange.max} kcal` : '暂无完整热量区间'}</span><span>${summary.unconfirmedIngredients} 项食材待确认</span>${summary.remainingRange ? `<span>剩余目标 ${summary.remainingRange.min}–${summary.remainingRange.max} kcal</span>` : ''}</section>${dailyNutritionHtml(dailyNutrition)}${nutritionWeekHtml(trend)}<form id="calorie-target-form" class="target-form"><label class="form-label" for="daily-calorie-target">每日热量目标（可选）</label><div class="target-input"><input class="field" id="daily-calorie-target" name="target" type="number" min="500" max="10000" step="50" value="${esc(state.settings.dailyCalorieTarget || '')}" placeholder="留空表示不设置"><button class="btn ghost small" type="submit">保存目标</button></div><small class="hint">不扣除运动消耗。</small></form></details>`);
 }
 
 function mealEntry(item) {
@@ -363,7 +360,7 @@ function mealEntry(item) {
       : estimate?.estimateKind === 'partial-subtotal' ? '已映射项小计，非整餐'
         : '按已确认食材估算';
   const aiLabel = item.aiAnalysis ? (item.aiAnalysis.recognized ? ' · AI 辅助后已确认' : ' · AI 未识别后手工记录') : '';
-  return `<div class="list-entry"><div><strong>${esc(item.food)}</strong><small>${esc(item.portion || '份量未补充')}${kcal ? ` · ${estimateLabel} ${kcal.min}–${kcal.max} kcal` : ''} · 行动：${({yes:'有实践',no:'未实践',unknown:'不确定'})[item.actionPractice]}<br>${fmtTime(item.createdAt)}${item.notes ? ` · ${esc(item.notes)}` : ''}${item.photoId ? ' · 照片已本地保存' : ''}${aiLabel}</small></div><div class="entry-actions"><button data-action="meal-template-save-record" data-id="${item.id}" aria-label="收藏${esc(item.food)}为常吃餐">收藏</button><button data-action="meal-edit" data-id="${item.id}" aria-label="编辑${esc(item.food)}">编辑</button><button data-action="meal-delete" data-id="${item.id}" aria-label="删除${esc(item.food)}">删除</button></div></div>`;
+  return `<div class="list-entry"><div><strong>${esc(item.food)} <small>${({breakfast:'早餐',lunch:'午餐',dinner:'晚餐',snack:'加餐'})[item.mealType || 'snack']}</small></strong><small>${esc(item.portion || '份量未补充')}${kcal ? ` · ${estimateLabel} ${kcal.min}–${kcal.max} kcal` : ''} · 本餐行动：${({yes:'有实践',no:'未实践',unknown:'不确定'})[item.actionPractice]}<br>${fmtTime(item.createdAt)}${item.notes ? ` · ${esc(item.notes)}` : ''}${item.photoId ? ' · 照片已本地保存' : ''}${aiLabel}</small></div><div class="entry-actions"><button data-action="meal-template-save-record" data-id="${item.id}" aria-label="收藏${esc(item.food)}为常吃餐">收藏</button><button data-action="meal-edit" data-id="${item.id}" aria-label="编辑${esc(item.food)}">编辑</button><button data-action="meal-delete" data-id="${item.id}" aria-label="删除${esc(item.food)}">删除</button></div></div>`;
 }
 
 function roomMemoryRecordsHtml() {
@@ -646,6 +643,7 @@ function captureMealDraftFromForm(form = $('#meal-form'), invalidateEstimate = f
     cookingMethod: data.get('cookingMethod') || 'unknown',
     portionScale: Number(data.get('portionScale')) || 100,
     practice: data.get('practice') || 'unknown',
+    taskConfirmation: data.get('taskConfirmation') || 'unknown',
     notes: data.get('notes') || '',
     ingredients: linesFromForm(data, 'ingredients'),
     fatsAndSauces: linesFromForm(data, 'fatsAndSauces'),
@@ -696,6 +694,8 @@ async function saveMeal(form) {
   try {
     transaction = commitLocalStateMutation(target.state, () => {
       let successMessage;
+      let feedbackMessage;
+      let taskResult = { confirmed: false, reward: { awarded: false } };
       let photoToDeleteAfterPersist = null;
       if (editId) {
         const item = target.state.meals.find((record) => record.id === editId);
@@ -714,8 +714,10 @@ async function saveMeal(form) {
           if (previousPhotoId !== stagedPhotoId) photoToDeleteAfterPersist = previousPhotoId;
         }
         invalidateDietConfirmation(target.state, item.date, at);
-        addPetEvent('companion', '餐食记录改好了；今天的任务结果先留作待确认。', item.id);
-        successMessage = '修改已保存，请重新确认相关饮食任务结果。';
+        taskResult = applyDietTaskConfirmation(target.state, item.date, draft.taskConfirmation, at);
+        feedbackMessage = taskResult.task?.status === 'completed' ? '这餐改好了，对应日期的饮食任务也已确认。' : '这餐已经改好并收进生活笔记了。';
+        addPetEvent(taskResult.task?.status === 'completed' ? 'excited' : 'companion', feedbackMessage, item.id, { present: false });
+        successMessage = taskResult.confirmed ? `修改已保存；对应日期的饮食任务已确认为“${taskResult.task.status === 'completed' ? '已完成' : '未完成'}”。` : '修改已保存；相关饮食任务保持待确认。';
       } else {
         const result = commitMealOnce(target.state, {
           clientSubmissionId: draft.clientSubmissionId, date: target.date, food: data.get('food'), mealType: draft.mealType, portion: data.get('portion'),
@@ -727,11 +729,15 @@ async function saveMeal(form) {
         if (result.created) item.cookingMethod = draft.cookingMethod;
         else if (stagedPhotoId) photoToDeleteAfterPersist = stagedPhotoId;
         const sticker = result.created ? settleRecordSticker(target.state, 'diet', item.id, at) : { awarded: false };
-        if (result.created) addPetEvent('companion', `我把「${item.food}」收进生活笔记了。`, item.id);
-        successMessage = result.created ? (sticker.awarded ? '餐食已确认保存，并获得一张料理贴纸；主任务仍待确认。' : '餐食已保存。') : '这次确认已处理，没有重复创建餐食或奖励。';
+        taskResult = applyDietTaskConfirmation(target.state, item.date, draft.taskConfirmation, at);
+        feedbackMessage = taskResult.task?.status === 'completed' ? `「${item.food}」已收好，饮食任务也已确认。` : `我把「${item.food}」收进生活笔记了。`;
+        if (result.created) addPetEvent(taskResult.task?.status === 'completed' ? 'excited' : 'companion', feedbackMessage, item.id, { present: false });
+        successMessage = !result.created ? '这次确认已处理，没有重复创建餐食或奖励。'
+          : taskResult.confirmed ? `餐食已保存；今天的饮食任务已确认为“${taskResult.task.status === 'completed' ? '已完成' : '未完成'}”。`
+            : sticker.awarded ? '餐食已保存，并获得一张料理贴纸；主任务状态未更改。' : '餐食已保存；主任务状态未更改。';
       }
       target.state.drafts.meal = {};
-      return { successMessage, photoToDeleteAfterPersist };
+      return { successMessage, feedbackMessage, photoToDeleteAfterPersist, taskRewardAwarded: Boolean(taskResult.reward?.awarded) };
     }, persist);
   } catch (error) {
     if (stagedPhotoId) deletePhoto(stagedPhotoId);
@@ -747,7 +753,10 @@ async function saveMeal(form) {
   mealAnalysisError = '';
   clearPendingPhoto();
   if (returnToRoom && modal === 'room-meal') modal = null;
-  render(); notify(transaction.value.successMessage);
+  if (transaction.value.feedbackMessage) presentRoomFeedback(transaction.value.taskRewardAwarded ? 'excited' : 'companion', transaction.value.feedbackMessage);
+  render();
+  if (transaction.value.taskRewardAwarded) showReward('diet');
+  else notify(transaction.value.successMessage);
 }
 
 function saveActivity(form) {
@@ -1010,6 +1019,7 @@ async function beginMealEdit(item) {
   state.drafts.meal = {
     clientSubmissionId: item.clientSubmissionId || uid('meal-submit'), editId:item.id, food:item.food, mealType:item.mealType || 'snack', portion:item.portion,
     cookingMethod:item.cookingMethod || 'unknown', portionScale:item.portionScale || 100, notes:item.notes, practice:item.actionPractice,
+    taskConfirmation:'unknown',
     ingredients:item.ingredients || [], fatsAndSauces:item.fatsAndSauces || [], aiAnalysis:item.aiAnalysis || null,
     nutritionEstimate:item.nutritionEstimate || null, existingPhotoId:item.photoId || null, photoChanged:false, removePhoto:false,
   };
@@ -1033,7 +1043,7 @@ function copyRecentMeal() {
   state.drafts.meal = {
     clientSubmissionId: uid('meal-submit'), food: source.food, mealType: source.mealType || 'snack',
     portion: source.portion || '', cookingMethod: source.cookingMethod || 'unknown', portionScale: source.portionScale || 100,
-    notes: '', practice: 'unknown', ingredients: structuredClone(source.ingredients || []),
+    notes: '', practice: 'unknown', taskConfirmation: 'unknown', ingredients: structuredClone(source.ingredients || []),
     fatsAndSauces: structuredClone(source.fatsAndSauces || []), nutritionEstimate: source.nutritionEstimate || null,
     aiAnalysis: null, existingPhotoId: null, photoChanged: false, removePhoto: false,
   };
