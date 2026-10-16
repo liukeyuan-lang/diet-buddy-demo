@@ -14,6 +14,10 @@ const MIN_WALK_DISTANCE_PX = 12;
 const MIN_STEP_MS = 520;
 const MAX_STEP_MS = 720;
 const MIN_SOFA_SCENE_HEIGHT = 360;
+// Keep a perch stroll inside the visible cushion rather than making a second
+// jump loop. Percentages are relative to the room, and are deliberately much
+// smaller than the floor destinations.
+const SOFA_STROLL_LIMIT = 4.5;
 // The sofa cushion's foot line in the approved 853x1844 room backdrop. The
 // backdrop uses object-fit: cover, so its visible y changes with both width and
 // height; deriving the anchor from that same crop keeps the jump off the backrest.
@@ -149,10 +153,16 @@ export function mountPetLife(scene, { toggle: suppliedToggle = null, paused = fa
   const rememberedSpot = lastPosition && lifeSpots.find((spot) => spot.name === lastPosition.name);
   const resumeInterrupted = lastPosition?.name === 'interrupted';
   const resumeRemembered = Boolean(rememberedSpot || resumeInterrupted);
-  let currentPosition = resumeRemembered ? lastPosition : lifeSpots[0];
-  let currentSpot = resumeRemembered ? (rememberedSpot || lastPosition) : lifeSpots[0];
+  const unavailableSofaPosition = lastPosition?.surface === 'sofa' && !lifeSpots.some((spot) => spot.name === 'sofa');
+  let currentPosition = resumeRemembered && !unavailableSofaPosition ? lastPosition : lifeSpots[0];
+  let currentSpot = resumeRemembered && !unavailableSofaPosition
+    ? (rememberedSpot || (resumeInterrupted && lastPosition?.surface === 'sofa'
+      ? lifeSpots.find((spot) => spot.name === 'sofa')
+      : lastPosition))
+    : lifeSpots[0];
   let currentSpotIndex = nearestSpotIndex(currentSpot, lifeSpots);
   let targetSpot = null;
+  let sofaStrollDone = false;
 
   const showAssetSurface = () => {
     if (lifeStage) lifeStage.hidden = !assetsReady;
@@ -180,6 +190,15 @@ export function mountPetLife(scene, { toggle: suppliedToggle = null, paused = fa
     if (position.surface) pet.dataset.petSurface = position.surface;
     else delete pet.dataset.petSurface;
   };
+  const placeInitialPosition = () => {
+    // A remounted button starts at the stylesheet's floor anchor. Commit a
+    // remembered perch before transitions are enabled so reopening a drawer
+    // never visibly travels from the floor back to the saved surface.
+    pet.style.transition = 'none';
+    placeAt(currentPosition, currentSpot);
+    pet.getBoundingClientRect();
+    pet.style.transition = '';
+  };
   const clear = () => {
     if (timer) window.clearTimeout(timer);
     if (phaseTimer) window.clearTimeout(phaseTimer);
@@ -201,16 +220,18 @@ export function mountPetLife(scene, { toggle: suppliedToggle = null, paused = fa
   const freeze = () => {
     const point = anchoredPetLifePosition(scene.getBoundingClientRect(), pet.getBoundingClientRect());
     if (!point) return;
+    const onSofa = pet.dataset.petSurface === 'sofa';
+    const frozenPosition = onSofa ? Object.freeze({ ...point, surface: 'sofa' }) : point;
     pet.style.transition = 'none';
     setTravelOffset();
-    placeAt(point);
+    placeAt(frozenPosition, onSofa ? currentSpot : frozenPosition);
     pet.getBoundingClientRect();
     pet.style.transition = '';
-    currentPosition = point;
-    currentSpot = point;
-    currentSpotIndex = nearestSpotIndex(point, lifeSpots);
+    currentPosition = frozenPosition;
+    if (!onSofa) currentSpot = frozenPosition;
+    currentSpotIndex = nearestSpotIndex(frozenPosition, lifeSpots);
     targetSpot = null;
-    lastPosition = point;
+    lastPosition = frozenPosition;
   };
   const nextSpot = () => {
     const currentIndex = lifeSpots.findIndex((spot) => spot.name === currentSpot.name);
@@ -256,7 +277,12 @@ export function mountPetLife(scene, { toggle: suppliedToggle = null, paused = fa
       if (spot.facing) pet.dataset.direction = spot.facing;
       setState('exploring');
       setActivity(spot.activity);
-      timer = window.setTimeout(schedule, 2100 + Math.floor(Math.random() * 1500));
+      const onSofa = spot.name === 'sofa' && currentPosition.surface === 'sofa';
+      if (onSofa && !sofaStrollDone) {
+        timer = window.setTimeout(() => strollOnSofa(spot, index), 1500 + Math.floor(Math.random() * 700));
+      } else {
+        timer = window.setTimeout(schedule, 2100 + Math.floor(Math.random() * 1500));
+      }
     };
     const arrive = (spot, index) => {
       if (!spot.perch) {
@@ -270,8 +296,61 @@ export function mountPetLife(scene, { toggle: suppliedToggle = null, paused = fa
       placeAt(spot.perch, spot);
       phaseTimer = window.setTimeout(() => {
         remember(spot.perch, spot);
+        sofaStrollDone = false;
         explore(spot, index);
       }, SURFACE_ACTION_MS);
+    };
+    const strollOnSofa = (spot, index) => {
+      const perch = spot.perch;
+      if (!perch || currentPosition.surface !== 'sofa') { explore(spot, index); return; }
+      const liveSceneRect = scene.getBoundingClientRect();
+      const livePetRect = pet.getBoundingClientRect();
+      const offset = currentPosition.left <= perch.left ? SOFA_STROLL_LIMIT : -SOFA_STROLL_LIMIT;
+      const targetPosition = Object.freeze({
+        ...perch,
+        name: 'sofa-stroll',
+        activity: spot.activity,
+        left: Math.max(perch.left - SOFA_STROLL_LIMIT, Math.min(perch.left + SOFA_STROLL_LIMIT, perch.left + offset)),
+      });
+      let movement = planPetLifeMove(currentPosition, targetPosition, {
+        sceneWidth: liveSceneRect.width,
+        sceneHeight: liveSceneRect.height,
+        petWidth: livePetRect.width,
+      });
+      if (!movement.travelMs) { sofaStrollDone = true; explore(spot, index); return; }
+      targetSpot = spot;
+      setActivity(spot.activity);
+      pet.dataset.turnTarget = movement.direction;
+      pet.style.setProperty('--roam-duration', `${movement.travelMs}ms`);
+      pet.style.setProperty('--step-duration', `${movement.stepMs}ms`);
+      setState('turning');
+      phaseTimer = window.setTimeout(() => {
+        pet.dataset.direction = movement.direction;
+        delete pet.dataset.turnTarget;
+        const fromRect = pet.getBoundingClientRect();
+        pet.style.transition = 'none';
+        placeAt(targetPosition, spot);
+        const toRect = pet.getBoundingClientRect();
+        const travelX = fromRect.left - toRect.left;
+        const travelY = fromRect.bottom - toRect.bottom;
+        const measuredDistancePx = Math.hypot(travelX, travelY);
+        if (measuredDistancePx > 0.5) {
+          movement = planPetLifeMove(currentPosition, targetPosition, { distancePx: measuredDistancePx, petWidth: fromRect.width });
+          pet.style.setProperty('--roam-duration', `${movement.travelMs}ms`);
+          pet.style.setProperty('--step-duration', `${movement.stepMs}ms`);
+        }
+        setTravelOffset(travelX, travelY);
+        setState('walking');
+        pet.getBoundingClientRect();
+        pet.style.transition = '';
+        setTravelOffset();
+        phaseTimer = window.setTimeout(() => {
+          remember(targetPosition, spot);
+          targetSpot = null;
+          sofaStrollDone = true;
+          explore(spot, index);
+        }, movement.travelMs);
+      }, TURN_MS);
     };
     const startTravel = (next) => {
       const liveSceneRect = scene.getBoundingClientRect();
@@ -430,7 +509,7 @@ export function mountPetLife(scene, { toggle: suppliedToggle = null, paused = fa
   window.addEventListener?.('resize', onResize);
   motionPreference?.addEventListener?.('change', onMotionPreference);
   updateToggle();
-  placeAt(currentPosition, currentSpot);
+  placeInitialPosition();
   schedule();
   if (lifeFrames.some((frame) => frame.complete && frame.naturalWidth === 0)) onAssetFailure();
 
